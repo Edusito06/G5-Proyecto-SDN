@@ -103,6 +103,30 @@ graph TD
 - La sincronización ONOS↔ONOS (`9876`) y Atomix (`5679`) usa la **red de gestión**. El control de los switches sigue siendo in-band.
 - Los caminos ARP/OpenFlow hacia ONOS-2 los instala `g05-redundancia`, con los mismos grupos Fast Failover que protegen a ONOS-1.
 
+### R2: acceso a recursos privilegiados por rol
+
+El rol viaja como VLAN = rol × 100. **R-SW1** aplica la política con el pipeline de 6 tablas de `r2ctl`, programado **por ONOS** (appId `edu.pucp.r2ctl`):
+
+| Tabla | Función |
+|---|---|
+| T0 | Ingreso: LLDP/EAPOL al controlador, tráfico de usuario a T1, tráfico de red a T5 |
+| T1 | Anti-spoofing: puerto + MAC + IP de cada usuario |
+| T2 | Mitigación (reservada para R3) |
+| T3 | Identidad: MAC → `push_vlan` del rol |
+| T4 | Política por rol (58 reglas): recursos permitidos, bloqueo del bloque crítico con meter, bloqueo de la intranet |
+| T5 | Salida hacia Core-1 con la VLAN del rol y entrega a cada usuario por MAC |
+
+Core-1 enruta entre las VLAN de rol y los segmentos de servicios (`g02` LDAP/RADIUS, `g11` DNS/DHCP, `srv` Recursos). Su firewall (`g05-core1-router.nft`) descarta todo intento de llegar a la gestión, al plano de control, al propio Core-1 o a otro usuario.
+
+| Rol | VLAN | Subred | Recursos permitidos |
+|---|---|---|---|
+| 1 invitado | 100 | 10.10.0.0/24 | DNS, Mesa de ayuda, Internet |
+| 2 alumno | 200 | 10.20.0.0/24 | + Portal |
+| 3 docente | 300 | 10.30.0.0/24 | + Notas, Investigación, Laboratorios |
+| 4 administrativo | 400 | 10.40.0.0/24 | Unidad administrativa, Portal, DNS, Mesa de ayuda, Internet |
+| 5 admin | 500 | 10.50.0.0/24 | Todo (salvo la infraestructura de control y gestión) |
+| 9 cuarentena | 900 | 10.90.0.0/24 | DNS y Mesa de ayuda, sin Internet |
+
 ### Servicios: DHCP de alumnos
 
 Cada segmento de servicio es un circuito L2 transportado con una VLAN entre switches y entregado sin etiqueta en sus extremos (`g05-servicios`, prioridad 50000):
@@ -139,7 +163,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 | Bootstrap in-band de los 6 switches | ✅ 6/6 DPID disponibles, evidencia sin diferencias |
 | Redundancia del canal de control (BFD + Fast Failover) | ✅ Probada ante caídas de enlace y de Core-1 |
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
-| R1 / R2 / R3 sobre la topología final | 🔜 Pendiente (R2 y R1 validados en el slice anterior) |
+| **R2** sobre la topología final (roles estáticos) | ✅ 216 pruebas, 0 discrepancias; 142/142 accesos no autorizados bloqueados |
+| R1 (802.1X dinámico) y R3 | 🔜 Pendiente |
 
 ---
 
@@ -158,7 +183,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── local-ip.yml              IP estática del puerto LOCAL de cada br0
 │   ├── evidencia-arbol.yml       Genera evidencia JSON del árbol (OVS vs ONOS)
 │   ├── redundancia.yml           Instala BFD, grupos Fast Failover y servicios
-│   ├── servicios.yml             Segmentos VLAN 200/111, relay en Core-1 y Kea
+│   ├── servicios.yml             Segmentos VLAN, Core-1 router, relay, Kea y servidores
+│   ├── inventario-servidores.yml Grupo servidores (recursos, ldap-radius, dns-dhcp)
 │   ├── cluster.yml               Atomix (3 nodos), ONOS-1/ONOS-2 en clúster y 2.º controlador
 │   ├── inventario-cluster.yml    Grupo atomix (onos-1, onos-2, atomix-3)
 │   ├── dhcp.yml                  Kea DHCPv4 para alumnos (lo importa servicios.yml)
@@ -168,6 +194,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   │   ├── paper-bridge.py       Preparación de br0 y reglas LOCAL en cada switch
 │   │   ├── g05-redundancia.py    Módulo de redundancia (ports | apply | status | remove)
 │   │   ├── g05-servicios.py      Segmentos de servicio (apply | status | remove)
+│   │   ├── g05-core1-router.nft  Firewall de Core-1 como router
+│   │   ├── servidores.sh, svc.py IPs por recurso, ruta de vuelta y servicios de prueba
 │   │   ├── cluster/              Plantillas Atomix/ONOS y scripts de arranque y configuración
 │   │   └── evidencia_arbol.py    Muestra del estado de cada switch
 │   ├── paper-app/                App ONOS org.g05.inband (Java, Maven) y su OAR
@@ -176,6 +204,11 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 ├── pruebas/
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
 │   └── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
+├── politica/                     R2 sobre el slice final
+│   ├── r2ctl.py                  Compilador y despliegue de la política por ONOS (modo enrutado)
+│   ├── policy.yaml               Recursos G01–G12 y permisos por rol
+│   ├── topology.yaml             R-SW1, usuarios de prueba y parámetros de verificación
+│   └── usuarios-ns.sh            Un namespace por rol en la VM Alumno (macvlan + IP fija)
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
     └── r2/                       r2ctl: despliegue declarativo de la política R2
@@ -207,8 +240,8 @@ bash iniciar-onos.sh Evidencia
 # 3. Redundancia del canal de control
 ansible-playbook -i inventario.yml redundancia.yml -k -K
 
-# 4. DHCP de alumnos (segmentos, relay y Kea)
-ansible-playbook -i inventario.yml servicios.yml -k -K
+# 4. Servicios: segmentos VLAN, Core-1 router, relay DHCP, Kea y servidores
+ansible-playbook -i inventario.yml -i inventario-servidores.yml servicios.yml -k -K
 
 # 5. Clúster de control (Atomix x3, ONOS-1 + ONOS-2, segundo controlador en los switches)
 ansible-playbook -i inventario.yml -i inventario-cluster.yml cluster.yml -k -K
@@ -263,6 +296,32 @@ sudo tail /var/lib/kea/kea-leases4.csv                      # concesión registr
 ```
 
 ---
+
+## R2 desde el Mac
+
+```bash
+cd politica
+python3 r2ctl.py validate            # 115 reglas en R-SW1 (58 en la tabla 4)
+python3 r2ctl.py apply               # instala por ONOS lo que falta y retira lo que sobra
+python3 r2ctl.py verify              # matriz con el rol actual de cada usuario
+python3 r2ctl.py verify --roles all  # u-cic recorre los 6 roles
+python3 r2ctl.py stats               # ocupación de tablas y contadores de la tabla 4
+```
+
+Requiere `pyyaml` y los canales SSH a ONOS-1 (5806) y a Alumno (5813). En Alumno, `g05-usuarios` crea los namespaces `u-inv`, `u-alu`, `u-doc`, `u-adm`, `u-net` y `u-cic`.
+
+**Resultados (Fase A):**
+
+| Métrica | Valor |
+|---|---|
+| Pruebas por matriz (6 usuarios × 36 destinos) | 216 |
+| Discrepancias contra la política | 0 |
+| Precisión en la restricción | 142/142 intentos no autorizados bloqueados (100 %) |
+| Reglas en R-SW1 (todas las apps) | 134 (115 de R2) |
+| `ovs-vswitchd` en R-SW1 | 4 % de CPU, 50 MB de RSS |
+| Aislamiento de infraestructura | El rol admin no alcanza gestión, ONOS-1/2, Core-1 ni otros usuarios |
+
+G01 (ONOS) queda fuera de la matriz: el plano de control in-band no acepta tráfico de usuarios, solo se administra por la red de gestión.
 
 ## Pruebas de falla y resultados
 
@@ -335,7 +394,7 @@ python3 r2/r2ctl.py validate   # también: plan, apply, verify, stats, rol, clea
 
 ## Hoja de ruta
 
-1. **R1 y R2 en la topología final:** autenticación (RADIUS/LDAP) y pipeline multi-tabla por rol.
+1. **R1 (Fase B):** 802.1X con FreeRADIUS + OpenLDAP y la app AAA de ONOS; `identity` une sesión, rol e IP (con Kea) y reemplaza las asignaciones estáticas. Incluye la ventana DHCP por rol (hoy el Alumno sin namespace queda sin DHCP, porque el puerto lo gobierna R2).
 2. **R3:** Suricata con espejo en R-SW1 y mitigación por la API REST de ONOS.
 3. **Prueba física de DF1:** apagar DC-DIST y comprobar que el control sigue por ONOS-2.
 

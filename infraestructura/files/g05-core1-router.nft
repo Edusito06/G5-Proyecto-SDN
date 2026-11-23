@@ -1,0 +1,30 @@
+#!/usr/sbin/nft -f
+# Core-1 como router entre las VLAN de rol y los segmentos de servicios (G05).
+# La política de acceso por rol (R2) la aplica R-SW1 por OpenFlow antes de llegar
+# aquí. Esta tabla solo protege la infraestructura: ningún tráfico de usuario ni
+# de servidores puede entrar a la gestión (ens3), al plano de control (br0) ni a
+# servicios del propio Core-1. Solo afecta a las interfaces L3 de servicio.
+table inet g05_router
+delete table inet g05_router
+table inet g05_router {
+    set usuarios { type ifname; elements = { "v100", "v200", "v300", "v400", "v500", "v900" } }
+    set servicios { type ifname; elements = { "g02", "g11", "srv" } }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept
+        iifname @usuarios oifname @servicios accept
+        counter comment "todo lo demás (gestión, control, usuario a usuario) se descarta"
+    }
+
+    chain input {
+        type filter hook input priority filter; policy accept;
+        ct state established,related accept
+        iifname @usuarios udp sport 68 udp dport 67 accept comment "relay DHCP"
+        iifname "g11" udp sport 67 udp dport 67 accept comment "respuestas de Kea al relay"
+        iifname @usuarios icmp type echo-request limit rate 10/second accept
+        iifname @servicios icmp type echo-request limit rate 10/second accept
+        iifname @usuarios counter drop
+        iifname @servicios counter drop
+    }
+}

@@ -1,0 +1,10 @@
+all:
+  vars:
+    ansible_user: ubuntu
+    ansible_python_interpreter: /usr/bin/python3
+  children:
+    servidores:
+      hosts:
+        recursos: {ansible_host: 192.168.0.21}
+        ldap-radius: {ansible_host: 192.168.0.19}
+        dns-dhcp: {ansible_host: 192.168.0.20}

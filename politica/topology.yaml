@@ -1,0 +1,54 @@
+# Topología R2 sobre el slice final de G05 (fase A: roles estáticos).
+#
+#   Alumno (VM) --ens7-- R-SW1 --ens4-- Core-1 (router: v100..v900 -> g02/g11/srv)
+#   namespaces u-*        acceso          VLAN = rol x 100 entre R-SW1 y Core-1
+#
+# R-SW1 es el único switch de acceso con usuarios: r2ctl le programa por ONOS el
+# pipeline de 6 tablas. En modo `enrutado` el tráfico permitido sale de R-SW1 con
+# la VLAN de su rol hacia Core-1, que enruta hacia los servidores. Los demás
+# switches solo transportan VLAN (g05-servicios) y no reciben reglas de r2ctl.
+modo: estatico
+enrutado: true
+
+switches:
+  r-sw1:
+    dpid: "of:0000000000000006"
+    funcion: acceso
+    mgmt: 192.168.0.13
+    salida: 1                      # puerto hacia Core-1 (gateway de los roles)
+    puertos:
+      1: {iface: ens4, a: core-1, uplink: true}
+      2: {iface: ens5, a: core-2, uplink: true}
+      3: {iface: ens6, a: ids, monitor: true}
+      4: {iface: ens7, a: alumno}
+
+# Usuarios de prueba: un namespace por rol en la VM Alumno, cada uno con su
+# macvlan (MAC propia) sobre ens4, que llega a R-SW1/ens7 (puerto 4).
+# rol: 1 invitado, 2 alumno, 3 docente, 4 administrativo, 5 admin, 9 cuarentena
+usuarios:
+  u-inv: {mac: '02:05:00:00:00:01', ip: 10.10.0.10, mascara: 24, rol: 1, switch: r-sw1,
+    puerto: 4, nodo: alumno, ns: u-inv}
+  u-alu: {mac: '02:05:00:00:00:02', ip: 10.20.0.10, mascara: 24, rol: 2, switch: r-sw1,
+    puerto: 4, nodo: alumno, ns: u-alu}
+  u-doc: {mac: '02:05:00:00:00:03', ip: 10.30.0.10, mascara: 24, rol: 3, switch: r-sw1,
+    puerto: 4, nodo: alumno, ns: u-doc}
+  u-adm: {mac: '02:05:00:00:00:04', ip: 10.40.0.10, mascara: 24, rol: 4, switch: r-sw1,
+    puerto: 4, nodo: alumno, ns: u-adm}
+  u-net: {mac: '02:05:00:00:00:05', ip: 10.50.0.10, mascara: 24, rol: 5, switch: r-sw1,
+    puerto: 4, nodo: alumno, ns: u-net}
+  u-cic: {mac: '02:05:00:00:00:09', ip: 10.90.0.20, mascara: 24, rol: 9, switch: r-sw1,
+    puerto: 4, nodo: alumno, ns: u-cic, octeto: 20}
+
+# Los servidores están detrás de Core-1 (no cuelgan de R-SW1).
+servidor: {}
+
+# IP que representa "Internet" (rango de documentación), alias en Recursos.
+internet_ip: 203.0.113.10
+
+# Usuario que recorre todos los roles en `verify --roles all` (usa el octeto .20
+# para no chocar con el usuario fijo de cada rol, que usa .10).
+host_ciclo: u-cic
+
+# G01 (ONOS) solo es alcanzable por la red de gestión: el plano de control
+# in-band no acepta tráfico de usuarios (lo protege Core-1 y las reglas de control).
+fuera_de_prueba: [G01]

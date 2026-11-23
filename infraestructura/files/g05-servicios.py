@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Segmentos de servicio del campus G05 sobre la fábrica OpenFlow (fase DHCP).
+"""Segmentos de servicio del campus G05 sobre la fábrica OpenFlow.
 
-Cada segmento es un circuito L2 punto a punto transportado con una VLAN entre
-switches y entregado sin etiqueta en sus extremos:
+Cada segmento es un circuito L2 transportado con una VLAN entre switches y
+entregado sin etiqueta en sus extremos. Core-1 tiene un puerto interno L3 por
+segmento y enruta entre ellos (con nftables aislando la red de gestión):
 
-  VLAN 200 (alumnos)  R-SW1/ens7 (Alumno)  <->  Core-1 puerto interno v200 (10.20.0.1/24)
-  VLAN 111 (G11)      Core-1 puerto interno g11 (10.100.1.129/28)  <->  DC-DIST/ens8 (DNS/DHCP)
+  Roles (R2)  VLAN rol x 100   R-SW1 (lo programa r2ctl)  <->  Core-1 v100..v900
+  G11         VLAN 111         Core-1 g11  <->  DC-DIST/ens8 (DNS/DHCP)
+  G02/G03     VLAN 112         Core-1 g02  <->  DC-DIST/ens7 (LDAP/RADIUS)
+  Recursos    VLAN 113         Core-1 srv  <->  DC-DIST/ens9 (Recursos)
 
-Core-1 actúa como relay DHCP (dhcrelay) entre ambos segmentos. Su reenvío IPv4
-queda desactivado: en esta fase el alumno solo puede hacer DHCP, ARP y ping a
-su gateway; el acceso a servicios lo abrirán R1/R2.
+En R-SW1 el puerto de usuarios lo programa r2ctl por ONOS (pipeline R2); este
+módulo solo transporta las VLAN de rol entre R-SW1 y los puertos L3 de Core-1.
 
 Uso (como root en el switch):  g05-servicios {apply|status|remove}
 """
@@ -27,13 +29,21 @@ OF = ["ovs-ofctl", "-O", "OpenFlow13", "--no-names"]
 VS = ["ovs-vsctl", "--timeout=10"]
 NETDIR = Path("/etc/systemd/network")
 
-VLAN_ALUMNOS, VLAN_G11 = 200, 111
-GW_ALUMNOS, ROUTER_G11, DHCP_SERVER = "10.20.0.1", "10.100.1.129", "10.100.1.130"
+ROLES = {1: "invitado", 2: "alumno", 3: "docente", 4: "administrativo", 5: "admin", 9: "cuarentena"}
+VLAN_G11, VLAN_G02, VLAN_SRV = 111, 112, 113
 
-# Puertos internos L3 de Core-1: nombre -> (ofport, dirección)
-L3 = {"v200": (200, f"{GW_ALUMNOS}/24"), "g11": (111, f"{ROUTER_G11}/28")}
-# Puertos de hosts usados en esta fase (verificados enviando tramas desde cada host)
-HOST_PORTS = {"r-sw1": ["ens7"], "dc-dist": ["ens8"]}
+# Puertos internos L3 de Core-1: nombre -> (ofport, VLAN, direcciones, rutas on-link extra)
+L3 = {f"v{r * 100}": (r * 100, r * 100, [f"10.{r * 10}.0.1/24"], []) for r in ROLES}
+L3.update({
+    "g11": (VLAN_G11, VLAN_G11, ["10.100.1.129/28"], []),
+    "g02": (VLAN_G02, VLAN_G02, ["10.100.0.17/28", "10.100.0.33/28"], []),
+    "srv": (VLAN_SRV, VLAN_SRV, ["10.100.0.49/28", "10.100.0.65/28", "10.100.0.129/28",
+                                 "10.100.0.145/28", "10.100.0.161/28", "10.100.0.177/28",
+                                 "10.100.1.1/25", "10.100.1.145/28"], ["203.0.113.10/32"]),
+})
+# Extremos en DC-DIST: VLAN -> interfaz del host
+DC_HOSTS = {VLAN_G11: "ens8", VLAN_G02: "ens7", VLAN_SRV: "ens9"}
+HOST_PORTS = {"dc-dist": list(DC_HOSTS.values())}
 
 
 def run(*args, **kw):
@@ -49,7 +59,8 @@ def ofport(nic):
 
 
 def untagged(in_port, match, actions):
-    return f"cookie={COOKIE},table=0,priority={PRIO},in_port={in_port},vlan_tci=0x0000/0x1fff,{match} actions={actions}"
+    m = f",{match}" if match else ""
+    return f"cookie={COOKIE},table=0,priority={PRIO},in_port={in_port},vlan_tci=0x0000/0x1fff{m} actions={actions}"
 
 
 def tagged(in_port, vid, actions):
@@ -65,50 +76,41 @@ def pop(port):
 
 
 def plan(host):
-    if host == "r-sw1":
-        alumno, up = ofport("ens7"), ofport("ens4")          # hacia Core-1
-        return [
-            untagged(alumno, "arp", push(VLAN_ALUMNOS, up)),
-            untagged(alumno, "udp,tp_src=68,tp_dst=67", push(VLAN_ALUMNOS, up)),
-            untagged(alumno, f"icmp,nw_dst={GW_ALUMNOS}", push(VLAN_ALUMNOS, up)),
-            tagged(up, VLAN_ALUMNOS, pop(alumno)),
-        ]
+    flows = []
     if host == "core-1":
         rsw1, dc = ofport("ens7"), ofport("ens6")
-        v200, g11 = L3["v200"][0], L3["g11"][0]
-        return [
-            tagged(rsw1, VLAN_ALUMNOS, pop(v200)),
-            untagged(v200, "arp", push(VLAN_ALUMNOS, rsw1)),
-            untagged(v200, "ip", push(VLAN_ALUMNOS, rsw1)),
-            tagged(dc, VLAN_G11, pop(g11)),
-            untagged(g11, "arp", push(VLAN_G11, dc)),
-            untagged(g11, "ip", push(VLAN_G11, dc)),
-        ]
-    if host == "dc-dist":
-        server, up = ofport("ens8"), ofport("ens4")          # hacia Core-1
-        return [
-            tagged(up, VLAN_G11, pop(server)),
-            untagged(server, "arp", push(VLAN_G11, up)),
-            untagged(server, "udp,tp_src=67", push(VLAN_G11, up)),
-            untagged(server, f"icmp,nw_dst={ROUTER_G11}", push(VLAN_G11, up)),
-        ]
-    return []
+        for name, (number, vid, _, _) in L3.items():
+            far = rsw1 if vid in {r * 100 for r in ROLES} else dc
+            flows.append(tagged(far, vid, pop(number)))
+            flows.append(untagged(number, "arp", push(vid, far)))
+            flows.append(untagged(number, "ip", push(vid, far)))
+    elif host == "dc-dist":
+        up = ofport("ens4")                                   # hacia Core-1
+        for vid, nic in DC_HOSTS.items():
+            server = ofport(nic)
+            flows.append(tagged(up, vid, pop(server)))
+            flows.append(untagged(server, "arp", push(vid, up)))
+            flows.append(untagged(server, "ip", push(vid, up)))
+    return flows
 
 
 def ensure_l3_ports():
-    for name, (number, address) in L3.items():
+    for name, (number, _, addresses, extra) in L3.items():
         if not out(*VS, "--if-exists", "get", "Interface", name, "ofport"):
             run(*VS, "add-port", BR, name, "--", "set", "Interface", name, "type=internal",
                 f"ofport_request={number}", "external_ids:g05-l3=true")
         profile = NETDIR / f"06-g05-{name}.network"
-        content = (f"[Match]\nName={name}\n[Network]\nAddress={address}\nDHCP=no\n"
-                   "LinkLocalAddressing=no\nIPv6AcceptRA=no\nConfigureWithoutCarrier=yes\n")
+        content = (f"[Match]\nName={name}\n[Network]\n"
+                   + "".join(f"Address={a}\n" for a in addresses)
+                   + "DHCP=no\nLinkLocalAddressing=no\nIPv6AcceptRA=no\nConfigureWithoutCarrier=yes\n"
+                   + "".join(f"[Route]\nDestination={r}\nScope=link\n" for r in extra))
         changed = not profile.exists() or profile.read_text() != content
         if changed:
             profile.write_text(content)
             run("networkctl", "reload")
         run("ip", "link", "set", "dev", name, "up")
-        if changed or address not in out("ip", "-4", "-o", "addr", "show", "dev", name):
+        present = out("ip", "-4", "-o", "addr", "show", "dev", name)
+        if changed or any(a not in present for a in addresses):
             run("networkctl", "reconfigure", name)
 
 
@@ -144,8 +146,7 @@ def do_apply(host):
 def do_status(host):
     print(out(*OF, "dump-flows", BR, SELECT))
     if host == "core-1":
-        print(out("ip", "-br", "-4", "addr", "show", "dev", "v200"))
-        print(out("ip", "-br", "-4", "addr", "show", "dev", "g11"))
+        print(out("ip", "-br", "-4", "addr", "show", "type", "openvswitch"))
 
 
 def do_remove(host):

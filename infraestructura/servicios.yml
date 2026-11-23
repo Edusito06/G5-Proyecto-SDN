@@ -1,14 +1,17 @@
 ---
-# Fase DHCP de alumnos (G05): segmentos VLAN 200 / 111 sobre la fábrica OpenFlow,
-# relay DHCP en Core-1 y Kea en DNS/DHCP.
-#   ansible-playbook -i inventario.yml servicios.yml -k -K
+# Servicios del campus G05 sobre la fábrica OpenFlow:
+#  - segmentos VLAN: rol x 100 (R-SW1 <-> Core-1), 111 (DNS/DHCP), 112 (LDAP/RADIUS), 113 (Recursos)
+#  - Core-1 como router (nftables aísla gestión, control y el propio Core-1)
+#  - relay DHCP en Core-1, Kea en DNS/DHCP y servicios de prueba en los servidores
+# La política por rol (R2) la instala r2ctl por ONOS en R-SW1 (ver politica/).
+#   ansible-playbook -i inventario.yml -i inventario-servidores.yml servicios.yml -k -K
 #
 # Las VMs del slice no tienen salida a Internet. Si faltan kea-dhcp4-server (DNS/DHCP)
 # o isc-dhcp-relay (Core-1), descárgalos en ONOS-1 con `apt-get download` y cópialos
 # a la VM antes de ejecutar este playbook.
 
 - name: Segmentos de servicio en los switches que los transportan
-  hosts: core-1:dc-dist:r-sw1
+  hosts: core-1:dc-dist:r-sw1   # en R-SW1 solo retira reglas antiguas: el puerto de usuarios es de r2ctl
   become: true
   gather_facts: false
   tasks:
@@ -84,33 +87,54 @@
         enabled: true
         state: started
 
-- name: Ruta de vuelta hacia los alumnos en DNS/DHCP
-  hosts: dhcp
+- name: Core-1 como router (reenvío IPv4 con nftables)
+  hosts: core-1
   become: true
   gather_facts: false
   tasks:
-    - name: Netplan de ens4 con la ruta a 10.20.0.0/24 por Core-1
+    - name: Reglas nftables
       ansible.builtin.copy:
-        dest: /etc/netplan/99-vnrt-ens4.yaml
-        mode: "0600"
+        src: files/g05-core1-router.nft
+        dest: /etc/g05-core1-router.nft
+        mode: "0644"
+        validate: nft -c -f %s
+    - name: Unidad que carga el firewall y luego activa el reenvío
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/g05-router.service
+        mode: "0644"
         content: |
-          network:
-            version: 2
-            ethernets:
-              ens4:
-                renderer: networkd
-                optional: true
-                dhcp4: false
-                dhcp6: false
-                accept-ra: false
-                link-local: []
-                addresses: [10.100.1.130/28]
-                routes:
-                  - to: 10.20.0.0/24
-                    via: 10.100.1.129
-      register: netplan_file
-    - name: Aplicar Netplan
-      ansible.builtin.command: netplan apply
-      when: netplan_file.changed
+          [Unit]
+          Description=Core-1 como router de servicios del G05 (nftables + reenvio IPv4)
+          After=network-pre.target
+          Before=network.target
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/sbin/nft -f /etc/g05-core1-router.nft
+          ExecStart=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
+          [Install]
+          WantedBy=multi-user.target
+    - name: Activar
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+        name: g05-router.service
+        enabled: true
+        state: restarted
+
+- name: Servidores (IPs por recurso, ruta de vuelta y servicios de prueba)
+  hosts: servidores
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Copiar svc.py y el script de preparación
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/tmp/{{ item }}"
+        mode: "0755"
+      loop: [svc.py, servidores.sh]
+    - name: Instalar svc.py
+      ansible.builtin.command: sudo install -D -m 755 /tmp/svc.py /opt/g05/svc.py
+    - name: Preparar el servidor
+      ansible.builtin.command: "bash /tmp/servidores.sh {{ inventory_hostname }}"
 
 - import_playbook: dhcp.yml
