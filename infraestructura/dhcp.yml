@@ -48,7 +48,7 @@
         group: _kea
         mode: '0640'
         backup: true
-        validate: /usr/sbin/kea-dhcp4 -t %s
+        # AppArmor no deja a kea-dhcp4 leer el temporal de Ansible: se valida en /etc/kea (tarea siguiente).
         content: |
           {
             "Dhcp4": {
@@ -77,6 +77,10 @@
             }
           }
       notify: Reiniciar Kea
+
+    - name: Validar la configuración instalada antes de reiniciar Kea
+      ansible.builtin.command: /usr/sbin/kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+      changed_when: false
 
     - name: Aplicar los cambios antes de verificar
       ansible.builtin.meta: flush_handlers

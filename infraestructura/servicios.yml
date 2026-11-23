@@ -1,0 +1,116 @@
+---
+# Fase DHCP de alumnos (G05): segmentos VLAN 200 / 111 sobre la fábrica OpenFlow,
+# relay DHCP en Core-1 y Kea en DNS/DHCP.
+#   ansible-playbook -i inventario.yml servicios.yml -k -K
+#
+# Las VMs del slice no tienen salida a Internet. Si faltan kea-dhcp4-server (DNS/DHCP)
+# o isc-dhcp-relay (Core-1), descárgalos en ONOS-1 con `apt-get download` y cópialos
+# a la VM antes de ejecutar este playbook.
+
+- name: Segmentos de servicio en los switches que los transportan
+  hosts: core-1:dc-dist:r-sw1
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Copiar el módulo
+      ansible.builtin.copy:
+        src: files/g05-servicios.py
+        dest: /usr/local/sbin/g05-servicios
+        mode: "0755"
+    - name: Servicio y comprobación periódica (solo reinstala si hay diferencias)
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ item.name }}"
+        mode: "0644"
+        content: "{{ item.content }}"
+      loop:
+        - name: g05-servicios.service
+          content: |
+            [Unit]
+            Description=Segmentos de servicio del G05 (VLAN 200 alumnos, VLAN 111 G11)
+            After=openvswitch-switch.service systemd-networkd.service
+            [Service]
+            Type=oneshot
+            ExecStart=/usr/local/sbin/g05-servicios apply
+        - name: g05-servicios.timer
+          content: |
+            [Unit]
+            Description=Restaurar los segmentos de servicio
+            [Timer]
+            OnBootSec=15s
+            OnUnitInactiveSec=30s
+            [Install]
+            WantedBy=timers.target
+    - name: Aplicar segmentos
+      ansible.builtin.command: /usr/local/sbin/g05-servicios apply
+      changed_when: false
+    - name: Habilitar la comprobación periódica
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+        name: g05-servicios.timer
+        enabled: true
+        state: started
+
+- name: Relay DHCP de alumnos en Core-1
+  hosts: core-1
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Unidad del relay (VLAN 200 -> Kea por el segmento G11)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/g05-dhcrelay.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Relay DHCP de alumnos (VLAN 200 -> Kea 10.100.1.130) del G05
+          After=network-online.target openvswitch-switch.service systemd-networkd.service
+          Wants=network-online.target
+          [Service]
+          ExecStart=/usr/sbin/dhcrelay -4 -d -id v200 -iu g11 10.100.1.130
+          Restart=on-failure
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+    - name: Desactivar las unidades de ejemplo del paquete
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop: [isc-dhcp-relay.service, isc-dhcp-relay6.service]
+      failed_when: false
+    - name: Arrancar el relay
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+        name: g05-dhcrelay.service
+        enabled: true
+        state: started
+
+- name: Ruta de vuelta hacia los alumnos en DNS/DHCP
+  hosts: dhcp
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Netplan de ens4 con la ruta a 10.20.0.0/24 por Core-1
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-vnrt-ens4.yaml
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              ens4:
+                renderer: networkd
+                optional: true
+                dhcp4: false
+                dhcp6: false
+                accept-ra: false
+                link-local: []
+                addresses: [10.100.1.130/28]
+                routes:
+                  - to: 10.20.0.0/24
+                    via: 10.100.1.129
+      register: netplan_file
+    - name: Aplicar Netplan
+      ansible.builtin.command: netplan apply
+      when: netplan_file.changed
+
+- import_playbook: dhcp.yml

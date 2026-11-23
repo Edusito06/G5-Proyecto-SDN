@@ -89,6 +89,32 @@ graph TD
 3. **Incorporación salto a salto** (app ONOS `org.g05.inband`, prioridad 62500). Cuando un switch hace ARP buscando a ONOS, el vecino ya conectado entrega el ARP por Packet-In. La app calcula el camino sobre los enlaces descubiertos por LLDP e instala el tránsito, y el switch abre su sesión OpenFlow. El procedimiento sigue el esquema de incorporación progresiva de *Sharma et al.*
 4. **Redundancia** (`g05-redundancia`, prioridades 64600/64000). Una vez arriba, se activan los enlaces redundantes con BFD y grupos **Fast Failover** que protegen el canal de control sin depender de ONOS.
 
+### Servicios: DHCP de alumnos
+
+Cada segmento de servicio es un circuito L2 transportado con una VLAN entre switches y entregado sin etiqueta en sus extremos (`g05-servicios`, prioridad 50000):
+
+| Segmento | Extremo A | Extremo B | Direccionamiento |
+|---|---|---|---|
+| VLAN 200 · alumnos | R-SW1 `ens7` (Alumno) | Core-1, puerto interno `v200` | `10.20.0.0/24`, gateway `10.20.0.1` |
+| VLAN 111 · G11 | Core-1, puerto interno `g11` | DC-DIST `ens8` (DNS/DHCP) | `10.100.1.128/28`, router `.129`, servidor `.130` |
+
+```mermaid
+sequenceDiagram
+    participant A as Alumno (R-SW1/ens7)
+    participant C as Core-1 (dhcrelay)
+    participant K as Kea (10.100.1.130)
+    A->>C: DHCPDISCOVER (broadcast, VLAN 200)
+    C->>K: BOOTREQUEST, giaddr 10.20.0.1 (VLAN 111)
+    K->>C: OFFER 10.20.0.100
+    C->>A: OFFER
+    A->>C: DHCPREQUEST
+    C->>K: BOOTREQUEST
+    K->>C: ACK (router 10.20.0.1, DNS 10.100.1.130, 8 h)
+    C->>A: ACK
+```
+
+Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del Alumno **ARP, DHCP e ICMP a su gateway**. El acceso a los servicios institucionales lo abrirán R1 (autenticación) y R2 (política por rol).
+
 ---
 
 ## Estado actual
@@ -98,7 +124,7 @@ graph TD
 | ONOS-1 (Docker, ONOS 2.7.0) | ✅ Operativo |
 | Bootstrap in-band de los 6 switches | ✅ 6/6 DPID disponibles, evidencia sin diferencias |
 | Redundancia del canal de control (BFD + Fast Failover) | ✅ Probada ante caídas de enlace y de Core-1 |
-| DHCP de alumnos (relay en Core-1 + Kea) | 🔜 Playbook listo (`dhcp.yml`), pendiente de despliegue |
+| DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
 | ONOS-2 + Atomix-3 (clúster Raft 2/3) | 🔜 Pendiente |
 | R1 / R2 / R3 sobre la topología final | 🔜 Pendiente (R2 y R1 validados en el slice anterior) |
 
@@ -119,12 +145,14 @@ graph TD
 │   ├── local-ip.yml              IP estática del puerto LOCAL de cada br0
 │   ├── evidencia-arbol.yml       Genera evidencia JSON del árbol (OVS vs ONOS)
 │   ├── redundancia.yml           Instala BFD, grupos Fast Failover y servicios
-│   ├── dhcp.yml                  Kea DHCPv4 para alumnos (siguiente fase)
+│   ├── servicios.yml             Segmentos VLAN 200/111, relay en Core-1 y Kea
+│   ├── dhcp.yml                  Kea DHCPv4 para alumnos (lo importa servicios.yml)
 │   ├── dns-gestion.yml           DNS de gestión para las VMs sin salida
 │   ├── inspeccionar.yml          Inventario de NIC/MAC de cada VM
 │   ├── files/
 │   │   ├── paper-bridge.py       Preparación de br0 y reglas LOCAL en cada switch
 │   │   ├── g05-redundancia.py    Módulo de redundancia (ports | apply | status | remove)
+│   │   ├── g05-servicios.py      Segmentos de servicio (apply | status | remove)
 │   │   └── evidencia_arbol.py    Muestra del estado de cada switch
 │   ├── paper-app/                App ONOS org.g05.inband (Java, Maven) y su OAR
 │   ├── templates/                Plantilla del perfil estático anterior
@@ -161,7 +189,12 @@ bash iniciar-onos.sh Evidencia
 
 # 3. Redundancia del canal de control
 ansible-playbook -i inventario.yml redundancia.yml -k -K
+
+# 4. DHCP de alumnos (segmentos, relay y Kea)
+ansible-playbook -i inventario.yml servicios.yml -k -K
 ```
+
+> **Sin salida a Internet:** en el slice solo ONOS-1 tiene salida, por NAT del Gateway. Para instalar `kea-dhcp4-server` (DNS/DHCP) e `isc-dhcp-relay` (Core-1) se descargan los `.deb` en ONOS-1 con `apt-get download` y se instalan en cada VM con `dpkg -i`.
 
 El módulo de redundancia también se opera directamente en cada switch:
 
@@ -196,6 +229,14 @@ sudo ovs-vsctl get Interface ens4 bfd_status         # state=up, forwarding=true
 | 64500 | `0x473500000001` | `paper-bridge.py` | ARP/TCP 6653 entre `LOCAL` y ONOS (árbol) |
 | 64000 | `0x473500000002` | `g05-redundancia` | Tránsito de control con respaldo |
 | 62500 | app `org.g05.inband` | ONOS | Tránsito calculado en el bootstrap |
+| 50000 | `0x473500000003` | `g05-servicios` | Segmentos VLAN 200 (alumnos) y 111 (G11) |
+
+```bash
+# DHCP (en Alumno, Core-1 y DNS/DHCP)
+sudo networkctl renew ens4 && ip -4 -br addr show ens4      # 10.20.0.100/24
+sudo journalctl -u g05-dhcrelay | grep Forwarded            # BOOTREQUEST / BOOTREPLY
+sudo tail /var/lib/kea/kea-leases4.csv                      # concesión registrada
+```
 
 ---
 
@@ -232,6 +273,9 @@ Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con B
 | 4 | Las reglas LOCAL se reinstalan cada 10 s y reinician sus contadores | `dl_vlan=0xffff` se almacena como `vlan_tci=0x0000/0x1fff` y la comparación textual nunca coincide | Se escribe directamente en el formato de OVS |
 
 **Otros hallazgos del slice:**
+- Las VMs no tienen salida a Internet (solo ONOS-1, por NAT del Gateway).
+- AppArmor impide que `kea-dhcp4 -t` lea archivos fuera de `/etc/kea`, así que la configuración se valida ya instalada.
+- `paper-bridge.py` rechazaba cualquier puerto no físico en `br0`. Ahora acepta los puertos internos marcados con `external_ids:g05-l3=true`.
 - ONOS-1 recibió un disco de 5,9 GB, no los 10 GB solicitados.
 - DC-DIST, R-SW1, R-SW2 y S-DIST tienen ~1 GB de RAM real.
 
@@ -255,10 +299,9 @@ python3 r2/r2ctl.py validate   # también: plan, apply, verify, stats, rol, clea
 
 ## Hoja de ruta
 
-1. **DHCP de alumnos:** relay en Core-1 (`10.20.0.1`) hacia Kea en DNS/DHCP (`10.100.1.130`), pool `10.20.0.100–199`.
-2. **ONOS-2 + Atomix-3:** clúster Raft 2/3 para tolerar la caída de DF1.
-3. **R1 y R2 en la topología final:** autenticación (RADIUS/LDAP) y pipeline multi-tabla por rol.
-4. **R3:** Suricata con espejo en R-SW1 y mitigación por la API REST de ONOS.
+1. **ONOS-2 + Atomix-3:** clúster Raft 2/3 para tolerar la caída de DF1.
+2. **R1 y R2 en la topología final:** autenticación (RADIUS/LDAP) y pipeline multi-tabla por rol.
+3. **R3:** Suricata con espejo en R-SW1 y mitigación por la API REST de ONOS.
 
 ---
 

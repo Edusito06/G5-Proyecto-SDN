@@ -83,7 +83,10 @@ def preflight(config, names):
     if BR in output(*OVS, "list-br").splitlines():
         owned = ovs_get("Bridge", BR, "external_ids:g05-bootstrap") == PROFILE
         existing_ports = set(output(*OVS, "list-ports", BR).splitlines())
-        unknown = existing_ports - config["data_ports"].keys()
+        # Los puertos internos L3 de g05-servicios (external_ids:g05-l3) son parte del diseño.
+        service_ports = {p for p in existing_ports
+                         if ovs_get("Interface", p, "external_ids:g05-l3") == "true"}
+        unknown = existing_ports - config["data_ports"].keys() - service_ports
         require(not unknown, f"br0 contiene puertos fuera del inventario físico: {sorted(unknown)}.")
         existing_target = output(*OVS, "get-controller", BR)
         configured_dpid = ovs_get("Bridge", BR, "other_config:datapath-id")
