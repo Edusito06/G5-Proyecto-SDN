@@ -9,7 +9,7 @@ ARP y OpenFlow (TCP/6653) entre el puerto LOCAL de cada br0 y ONOS-1:
   * Reglas de prioridad superior a las del bootstrap (cookie propia), de modo que
     el camino primario coincide con el árbol actual y el respaldo entra solo.
 
-Uso (como root en el switch):  g05-redundancia {ports|apply|status|remove}
+Uso (como root en el switch):  g05-redundancia {ports|apply|controllers|status|remove}
 """
 import re
 import socket
@@ -19,7 +19,10 @@ import tempfile
 from pathlib import Path
 
 BR = "br0"
-ONOS = "10.100.0.2"
+ONOS = "10.100.0.2"      # ONOS-1, colgado de DC-DIST (DF1)
+ONOS2 = "10.100.0.9"     # ONOS-2, colgado de R-SW2 (DF2)
+TARGETS = [f"tcp:{ONOS}:6653", f"tcp:{ONOS2}:6653"]
+CONTROLLER_PEERS = ("onos-1", "onos-2")   # puertos hacia VMs de control: sin BFD
 COOKIE = "0x473500000002"
 SELECT = f"cookie={COOKIE}/-1"
 P_LOCAL = 64600      # por encima de las reglas LOCAL del bootstrap (64500)
@@ -36,7 +39,7 @@ FABRIC = {
     "core-2": {"dc-dist": "ens6", "core-1": "ens5", "r-sw1": "ens7", "r-sw2": "ens8", "s-dist": "ens9"},
     "dc-dist": {"core-1": "ens4", "core-2": "ens5", "onos-1": "ens6"},
     "r-sw1": {"core-1": "ens4", "core-2": "ens5"},
-    "r-sw2": {"core-1": "ens4", "core-2": "ens5"},
+    "r-sw2": {"core-1": "ens4", "core-2": "ens5", "onos-2": "ens6"},
     "s-dist": {"core-1": "ens4", "core-2": "ens5"},
 }
 CORES = ("core-1", "core-2")
@@ -114,7 +117,50 @@ def plan(host):
             add(P_TRANSIT, o, ONOS, IP[peer], False, f"group:{gid}")
     else:
         raise SystemExit(f"Host desconocido: {host}")
+    plan_onos2(host, me, fab, add)
     return groups, flows
+
+
+def plan_onos2(host, me, fab, add):
+    """Caminos ARP/OpenFlow hacia ONOS-2 (10.100.0.9), colgado de R-SW2.
+
+    Reutiliza los grupos Fast Failover del plan principal: en las hojas y en DC-DIST
+    el grupo GBASE sube por Core-1 o Core-2; en los cores, el grupo de R-SW2 baja
+    por su enlace directo o por el otro core, y GBASE va hacia DC-DIST.
+    """
+    others = [s for s in IP if s != host]
+    if host == "r-sw2":
+        o2 = fab["onos-2"]
+        add(P_LOCAL, "LOCAL", me, ONOS2, True, f"output:{o2}")
+        add(P_TRANSIT, o2, ONOS2, me, False, "LOCAL")
+        for peer in others:
+            add(P_TRANSIT, o2, ONOS2, IP[peer], False, f"group:{GBASE}")
+            for p in (fab["core-1"], fab["core-2"]):
+                add(P_TRANSIT, p, IP[peer], ONOS2, True, f"output:{o2}")
+    elif host in LEAVES or host == ROOT:
+        add(P_LOCAL, "LOCAL", me, ONOS2, True, f"group:{GBASE}")
+        for p in (fab["core-1"], fab["core-2"]):
+            add(P_TRANSIT, p, ONOS2, me, False, "LOCAL")
+    elif host in CORES:
+        other = "core-2" if host == "core-1" else "core-1"
+        d, x, r2 = fab[ROOT], fab[other], fab["r-sw2"]
+        g_r2 = GBASE + 1 + LEAVES.index("r-sw2")              # [R-SW2, otro core]
+        add(P_LOCAL, "LOCAL", me, ONOS2, True, f"group:{g_r2}")
+        for leaf in LEAVES:
+            if leaf != "r-sw2":
+                add(P_TRANSIT, fab[leaf], IP[leaf], ONOS2, True, f"group:{g_r2}")
+        add(P_TRANSIT, d, IP[ROOT], ONOS2, True, f"group:{g_r2}")
+        for peer in [l for l in LEAVES if l != "r-sw2"] + [ROOT, other]:
+            add(P_TRANSIT, x, IP[peer], ONOS2, True, f"output:{r2}")     # desviado por el otro core
+        for p in (r2, x):
+            add(P_TRANSIT, p, ONOS2, me, False, "LOCAL")
+        for i, leaf in enumerate(LEAVES):
+            if leaf != "r-sw2":
+                add(P_TRANSIT, r2, ONOS2, IP[leaf], False, f"group:{GBASE + 1 + i}")
+                add(P_TRANSIT, x, ONOS2, IP[leaf], False, f"output:{fab[leaf]}")
+        add(P_TRANSIT, r2, ONOS2, IP[ROOT], False, f"group:{GBASE}")
+        add(P_TRANSIT, x, ONOS2, IP[ROOT], False, f"output:{d}")
+        add(P_TRANSIT, r2, ONOS2, IP[other], False, f"output:{x}")
 
 
 def group_spec(gid, ports):
@@ -133,10 +179,10 @@ def live_groups():
 
 def do_ports(host):
     for peer, nic in FABRIC[host].items():
-        if peer == "onos-1":
-            continue  # ONOS no habla BFD: activarlo dejaría el puerto como no vivo
         run("ip", "link", "set", "dev", nic, "up")
         run(*OF, "mod-port", BR, nic, "up")
+        if peer in CONTROLLER_PEERS:
+            continue  # ONOS no habla BFD: activarlo dejaría el puerto como no vivo
         current = out(*VS, "get", "Interface", nic, "bfd")
         if any(f'{k}="{v}"' not in current and f"{k}={v}" not in current for k, v in BFD.items()):
             run(*VS, "set", "Interface", nic, *[f"bfd:{k}={v}" for k, v in BFD.items()])
@@ -166,12 +212,26 @@ def do_apply(host):
     print(f"{host}: {len(groups)} grupos FF y {len(flows)} reglas de respaldo")
 
 
+def do_controllers(host):
+    """Registra ONOS-1 y ONOS-2 como controladores de br0, sin asistencia in-band de OVS."""
+    current = out(*VS, "get-controller", BR).split()
+    for target in TARGETS:
+        if target not in current:
+            run(*VS, "--", "--id=@c", "create", "Controller", f'target="{target}"',
+                "connection_mode=out-of-band", "--", "add", "Bridge", BR, "controller", "@c")
+    for ref in out(*VS, "get", "Bridge", BR, "controller").strip("[]").split(","):
+        if ref.strip():
+            run(*VS, "set", "Controller", ref.strip(), "connection_mode=out-of-band")
+    print(f"{host}: controladores {out(*VS, 'get-controller', BR).split()}")
+
+
 def do_status(host):
     print(out(*OF, "dump-groups", BR))
     print(out(*OF, "dump-group-stats", BR))
     for peer, nic in FABRIC[host].items():
-        if peer != "onos-1":
+        if peer not in CONTROLLER_PEERS:
             print(f"{nic} -> {peer}: {out(*VS, 'get', 'Interface', nic, 'bfd_status')}")
+    print(out(*VS, "--columns=target,is_connected,role", "list", "Controller"))
 
 
 def do_remove(host):
@@ -180,14 +240,15 @@ def do_remove(host):
         if gid in GRANGE:
             run(*OF, "del-groups", BR, f"group_id={gid}")
     for peer, nic in FABRIC[host].items():
-        if peer != "onos-1":
+        if peer not in CONTROLLER_PEERS:
             run(*VS, "remove", "Interface", nic, "bfd", *BFD.keys())
     print(f"{host}: respaldo retirado (los puertos quedan como estaban)")
 
 
 def main():
     host = socket.gethostname()
-    actions = {"ports": do_ports, "apply": do_apply, "status": do_status, "remove": do_remove}
+    actions = {"ports": do_ports, "apply": do_apply, "controllers": do_controllers,
+               "status": do_status, "remove": do_remove}
     if len(sys.argv) != 2 or sys.argv[1] not in actions:
         raise SystemExit(__doc__)
     actions[sys.argv[1]](host)

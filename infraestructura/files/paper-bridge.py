@@ -11,6 +11,7 @@ from pathlib import Path
 BR = "br0"
 ONOS = "10.100.0.2"
 TARGET = f"tcp:{ONOS}:6653"
+TARGET_ONOS2 = "tcp:10.100.0.9:6653"  # segundo controlador del clúster
 COOKIE = "0x473500000001"
 OLD_COOKIE = "0x4730350000006653"
 SELECT = f"table=0,cookie={COOKIE}/0xffffffffffffffff"
@@ -98,7 +99,8 @@ def preflight(config, names):
         flows = output(*OF, "dump-flows", BR)
         old_cookie = OLD_COOKIE in flows
         require(not old_cookie or migrate, "br0 conserva flujos del bootstrap anterior. Requiere migración explícita.")
-        require(not existing_target or existing_target == TARGET,
+        targets = set(existing_target.split())
+        require(not targets or (TARGET in targets and targets <= {TARGET, TARGET_ONOS2}),
                 "br0 ya tiene un controlador ajeno al perfil. Revisa el bootstrap existente.")
         if not owned:
             for flow in flows.splitlines():
@@ -127,9 +129,10 @@ def apply(config, names, all_ports):
     for nic, number in all_ports.items():
         cmd += ["--", "--may-exist", "add-port", BR, nic, "--", "set", "Interface", nic,
                 f"ofport_request={number}"]
-    ref = ovs_get("Bridge", BR, "controller").strip("[] ")
-    if ref:
-        cmd += ["--", "set", "Controller", ref, "connection_mode=out-of-band"]
+    refs = [r.strip() for r in ovs_get("Bridge", BR, "controller").strip("[] ").split(",") if r.strip()]
+    if refs:  # ONOS-1 y, desde la fase de clúster, ONOS-2 (g05-redundancia controllers)
+        for ref in refs:
+            cmd += ["--", "set", "Controller", ref, "connection_mode=out-of-band"]
     else:
         cmd += ["--", "--id=@c", "create", "Controller", f"target={json.dumps(TARGET)}",
                 "connection_mode=out-of-band", "--", "set", "Bridge", BR, "controller=@c"]

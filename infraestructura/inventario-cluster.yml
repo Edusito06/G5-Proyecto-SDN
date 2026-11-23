@@ -1,0 +1,10 @@
+all:
+  vars:
+    ansible_user: ubuntu
+    ansible_python_interpreter: /usr/bin/python3
+  children:
+    atomix:
+      hosts:
+        onos-1: {ansible_host: 192.168.0.16, atomix_id: atomix-1}
+        onos-2: {ansible_host: 192.168.0.17, atomix_id: atomix-2}
+        atomix-3: {ansible_host: 192.168.0.18, atomix_id: atomix-3}

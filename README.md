@@ -2,7 +2,7 @@
 
 Proyecto del curso **TEL354 – Redes Definidas por Software** (PUCP, 2026-2), grupo **G05**.
 
-Solución SDN para una red de campus académico desplegada sobre el *private cloud* **VNRT**: un clúster de control **ONOS** gobierna seis switches **Open vSwitch** mediante **OpenFlow 1.3**. El canal de control viaja **in-band** por la propia red de datos, con caminos de respaldo que se activan en menos de un segundo ante la caída de enlaces o de un switch de núcleo.
+Solución SDN para una red de campus académico desplegada sobre el *private cloud* **VNRT**: un clúster de control **ONOS** de dos nodos, respaldado por **Atomix** (Raft, 3 nodos), gobierna seis switches **Open vSwitch** mediante **OpenFlow 1.3**. El canal de control viaja **in-band** por la propia red de datos, con caminos de respaldo que se activan en menos de un segundo ante la caída de enlaces o de un switch de núcleo.
 
 Requerimientos del grupo: **R1** (control de acceso por rol), **R2** (protección de recursos privilegiados) y **R3** (detección y mitigación de ataques encubiertos en la intranet).
 
@@ -80,7 +80,8 @@ graph TD
 | R-SW1 | 10.100.0.6/28 | `of:0000000000000006` |
 | R-SW2 | 10.100.0.7/28 | `of:0000000000000007` |
 | S-DIST | 10.100.0.8/28 | `of:0000000000000008` |
-| **ONOS-1** | **10.100.0.2/28** (`ens4`) | — |
+| **ONOS-1** | **10.100.0.2/28** (`ens4`, vía DC-DIST `ens6`) | — |
+| **ONOS-2** | **10.100.0.9/28** (`ens4`, vía R-SW2 `ens6`) | — |
 
 ### Cómo arranca el control in-band
 
@@ -88,6 +89,19 @@ graph TD
 2. **Reglas locales mínimas** (`paper-bridge.py`, prioridad 64500). Solo permiten ARP y TCP/6653 entre el puerto `LOCAL` y ONOS.
 3. **Incorporación salto a salto** (app ONOS `org.g05.inband`, prioridad 62500). Cuando un switch hace ARP buscando a ONOS, el vecino ya conectado entrega el ARP por Packet-In. La app calcula el camino sobre los enlaces descubiertos por LLDP e instala el tránsito, y el switch abre su sesión OpenFlow. El procedimiento sigue el esquema de incorporación progresiva de *Sharma et al.*
 4. **Redundancia** (`g05-redundancia`, prioridades 64600/64000). Una vez arriba, se activan los enlaces redundantes con BFD y grupos **Fast Failover** que protegen el canal de control sin depender de ONOS.
+
+### Clúster de control
+
+| Nodo | VM | Dominio | Rol |
+|---|---|---|---|
+| ONOS-1 + Atomix-1 | onos-1 (`192.168.0.16`) | DF1 | Controlador y votante Raft |
+| ONOS-2 + Atomix-2 | onos-2 (`192.168.0.17`) | DF2 | Controlador y votante Raft |
+| Atomix-3 | atomix-3 (`192.168.0.18`) | DF3 | Solo votante (árbitro) |
+
+- Cada switch tiene **dos controladores** (`tcp:10.100.0.2:6653` y `tcp:10.100.0.9:6653`), los dos alcanzados in-band. ONOS reparte la maestría: uno es `master` y el otro queda en `standby`.
+- El estado de la red (reglas, grupos, configuración de apps) vive en **Atomix**. Con 2 de 3 votos hay quórum, así que la caída completa de DF1 deja operativos a ONOS-2, Atomix-2 y Atomix-3.
+- La sincronización ONOS↔ONOS (`9876`) y Atomix (`5679`) usa la **red de gestión**. El control de los switches sigue siendo in-band.
+- Los caminos ARP/OpenFlow hacia ONOS-2 los instala `g05-redundancia`, con los mismos grupos Fast Failover que protegen a ONOS-1.
 
 ### Servicios: DHCP de alumnos
 
@@ -121,11 +135,10 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 
 | Componente | Estado |
 |---|---|
-| ONOS-1 (Docker, ONOS 2.7.0) | ✅ Operativo |
+| Clúster ONOS-1 + ONOS-2 sobre Atomix (3 nodos) | ✅ Operativo; ONOS-2 asume los 6 switches en ~10 s si cae DF1 |
 | Bootstrap in-band de los 6 switches | ✅ 6/6 DPID disponibles, evidencia sin diferencias |
 | Redundancia del canal de control (BFD + Fast Failover) | ✅ Probada ante caídas de enlace y de Core-1 |
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
-| ONOS-2 + Atomix-3 (clúster Raft 2/3) | 🔜 Pendiente |
 | R1 / R2 / R3 sobre la topología final | 🔜 Pendiente (R2 y R1 validados en el slice anterior) |
 
 ---
@@ -146,6 +159,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── evidencia-arbol.yml       Genera evidencia JSON del árbol (OVS vs ONOS)
 │   ├── redundancia.yml           Instala BFD, grupos Fast Failover y servicios
 │   ├── servicios.yml             Segmentos VLAN 200/111, relay en Core-1 y Kea
+│   ├── cluster.yml               Atomix (3 nodos), ONOS-1/ONOS-2 en clúster y 2.º controlador
+│   ├── inventario-cluster.yml    Grupo atomix (onos-1, onos-2, atomix-3)
 │   ├── dhcp.yml                  Kea DHCPv4 para alumnos (lo importa servicios.yml)
 │   ├── dns-gestion.yml           DNS de gestión para las VMs sin salida
 │   ├── inspeccionar.yml          Inventario de NIC/MAC de cada VM
@@ -153,12 +168,14 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   │   ├── paper-bridge.py       Preparación de br0 y reglas LOCAL en cada switch
 │   │   ├── g05-redundancia.py    Módulo de redundancia (ports | apply | status | remove)
 │   │   ├── g05-servicios.py      Segmentos de servicio (apply | status | remove)
+│   │   ├── cluster/              Plantillas Atomix/ONOS y scripts de arranque y configuración
 │   │   └── evidencia_arbol.py    Muestra del estado de cada switch
 │   ├── paper-app/                App ONOS org.g05.inband (Java, Maven) y su OAR
 │   ├── templates/                Plantilla del perfil estático anterior
 │   └── evidencia/                Evidencia JSON generada en el slice
 ├── pruebas/
-│   └── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
+│   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
+│   └── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
     └── r2/                       r2ctl: despliegue declarativo de la política R2
@@ -192,7 +209,14 @@ ansible-playbook -i inventario.yml redundancia.yml -k -K
 
 # 4. DHCP de alumnos (segmentos, relay y Kea)
 ansible-playbook -i inventario.yml servicios.yml -k -K
+
+# 5. Clúster de control (Atomix x3, ONOS-1 + ONOS-2, segundo controlador en los switches)
+ansible-playbook -i inventario.yml -i inventario-cluster.yml cluster.yml -k -K
 ```
+
+> **Orden crítico al (re)crear ONOS en clúster:** el almacén nuevo empieza vacío. `onos-configurar.sh` activa `allowExtraneousRules` y `allowExtraneousGroups`, instala la app in-band y **recién después** activa OpenFlow. Si los switches se reconectan antes, ONOS borra las reglas de control locales y se pierde el in-band.
+>
+> `onos.yml` corresponde a la fase de un solo nodo (exige un único nodo en el clúster). Tras `cluster.yml` ya no se usa.
 
 > **Sin salida a Internet:** en el slice solo ONOS-1 tiene salida, por NAT del Gateway. Para instalar `kea-dhcp4-server` (DNS/DHCP) e `isc-dhcp-relay` (Core-1) se descargan los `.deb` en ONOS-1 con `apt-get download` y se instalan en cada VM con `dpkg -i`.
 
@@ -253,7 +277,17 @@ sudo tail /var/lib/kea/kea-leases4.csv                      # concesión registr
 
 Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con BFD (`min_rx = min_tx = 100 ms`) tarda menos de 0,5 s, por debajo del margen de *keepalive* de OpenFlow.
 
-**Fuera de alcance por ahora:** la caída de DC-DIST o de ONOS-1 deja el control sin camino hasta desplegar ONOS-2.
+**Caída de DF1 en el plano de control** (`pruebas/prueba-caida-df1.sh`): se detienen ONOS-1 y Atomix-1.
+
+| Tiempo desde la caída | Switches con ONOS-2 como master |
+|---|---|
+| 3–6 s | 0/6 |
+| 8 s | 2/6 |
+| 11 s | 6/6 |
+
+Atomix siguió con 2 de 3 votos sin elecciones nuevas, porque los líderes de las particiones estaban en Atomix-2 y Atomix-3. Al restaurar, ONOS-1 vuelve al clúster con la configuración intacta, que está guardada en Atomix. La medición tiene una resolución de ~3 s, porque cada vuelta consulta los 6 switches por SSH.
+
+**Pendiente de probar:** la caída física de DC-DIST, que en la topología es el único camino in-band hacia ONOS-1.
 
 ---
 
@@ -274,6 +308,8 @@ Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con B
 
 **Otros hallazgos del slice:**
 - Las VMs no tienen salida a Internet (solo ONOS-1, por NAT del Gateway).
+- Las imágenes Docker se copian entre VMs con `docker save | ssh | docker load`, y los paquetes `.deb` (Docker, Kea, relay) se bajan en ONOS-1 y se instalan con `dpkg -i`.
+- ONOS-1 tiene un disco de 5,9 GB: con las imágenes de ONOS (1,45 GB) y Atomix (1 GB) queda sin margen. Hay que vigilar `df -h /` antes de cada cambio.
 - AppArmor impide que `kea-dhcp4 -t` lea archivos fuera de `/etc/kea`, así que la configuración se valida ya instalada.
 - `paper-bridge.py` rechazaba cualquier puerto no físico en `br0`. Ahora acepta los puertos internos marcados con `external_ids:g05-l3=true`.
 - ONOS-1 recibió un disco de 5,9 GB, no los 10 GB solicitados.
@@ -299,9 +335,9 @@ python3 r2/r2ctl.py validate   # también: plan, apply, verify, stats, rol, clea
 
 ## Hoja de ruta
 
-1. **ONOS-2 + Atomix-3:** clúster Raft 2/3 para tolerar la caída de DF1.
-2. **R1 y R2 en la topología final:** autenticación (RADIUS/LDAP) y pipeline multi-tabla por rol.
-3. **R3:** Suricata con espejo en R-SW1 y mitigación por la API REST de ONOS.
+1. **R1 y R2 en la topología final:** autenticación (RADIUS/LDAP) y pipeline multi-tabla por rol.
+2. **R3:** Suricata con espejo en R-SW1 y mitigación por la API REST de ONOS.
+3. **Prueba física de DF1:** apagar DC-DIST y comprobar que el control sigue por ONOS-2.
 
 ---
 

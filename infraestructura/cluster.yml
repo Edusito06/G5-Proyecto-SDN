@@ -1,0 +1,92 @@
+---
+# Clúster de control del G05: Atomix en 3 dominios de falla + ONOS-1 y ONOS-2.
+#   ansible-playbook -i inventario.yml -i inventario-cluster.yml cluster.yml -k -K
+#
+# Requisitos: Docker y las imágenes atomix/atomix:3.1.5 y onosproject/onos:2.7.0 en
+# cada nodo (las VMs no tienen Internet: se descargan en ONOS-1 y se copian con
+# `docker save | ssh ... docker load`), y ~/.netrc con la cuenta REST en ONOS-1.
+# La sincronización Atomix/ONOS usa la red de gestión (192.168.0.0/24); el control
+# de los switches sigue in-band (ONOS-1 10.100.0.2, ONOS-2 10.100.0.9).
+
+- name: Nodos Atomix (Raft 3 nodos, red de host, puerto 5679)
+  hosts: atomix
+  become: false
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Copiar el script de arranque
+      ansible.builtin.copy:
+        src: files/cluster/atomix-run.sh
+        dest: /tmp/atomix-run.sh
+        mode: "0755"
+    - name: Ejecutarlo con la plantilla de configuración
+      ansible.builtin.shell: /tmp/atomix-run.sh {{ atomix_id }} {{ ansible_host }}
+      args:
+        stdin: "{{ lookup('ansible.builtin.file', 'files/cluster/atomix.conf.tmpl') }}"
+
+- name: IP de datos de ONOS-2 (in-band, colgado de R-SW2 ens6)
+  hosts: onos-2
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Netplan de ens4
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-vnrt-ens4.yaml
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              ens4:
+                renderer: networkd
+                optional: true
+                dhcp4: false
+                dhcp6: false
+                accept-ra: false
+                link-local: []
+                addresses: [10.100.0.9/28]
+      register: netplan_onos2
+    - name: Aplicar Netplan
+      ansible.builtin.command: netplan apply
+      when: netplan_onos2.changed
+
+- name: ONOS en modo clúster (primero ONOS-1, que configura el clúster)
+  hosts: onos-1:onos-2
+  become: false
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Copiar scripts
+      ansible.builtin.copy:
+        src: "files/cluster/{{ item }}"
+        dest: "/tmp/{{ item }}"
+        mode: "0755"
+      loop: [onos-run.sh, onos-configurar.sh]
+    - name: Levantar ONOS con cluster.json (OpenFlow desactivado hasta configurar)
+      ansible.builtin.shell: /tmp/onos-run.sh {{ ansible_host }}
+      args:
+        stdin: "{{ lookup('ansible.builtin.file', 'files/cluster/cluster.json.tmpl') }}"
+    - name: Copiar la app in-band
+      ansible.builtin.copy:
+        src: paper-app/target/g05-inband-1.0.0.oar
+        dest: /tmp/g05-inband-1.0.0.oar
+      when: inventory_hostname == 'onos-1'
+    - name: Permitir reglas/grupos externos, activar la app y luego OpenFlow
+      ansible.builtin.command: timeout 400 /tmp/onos-configurar.sh /tmp/g05-inband-1.0.0.oar
+      when: inventory_hostname == 'onos-1'
+
+- name: Caminos in-band hacia ONOS-2 y segundo controlador en los switches
+  hosts: ovs
+  become: true
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Copiar el módulo de redundancia (incluye los caminos a ONOS-2)
+      ansible.builtin.copy:
+        src: files/g05-redundancia.py
+        dest: /usr/local/sbin/g05-redundancia
+        mode: "0755"
+    - name: Puertos, reglas y controladores
+      ansible.builtin.command: "/usr/local/sbin/g05-redundancia {{ item }}"
+      loop: [ports, apply, controllers]
+      changed_when: false
