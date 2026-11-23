@@ -1,0 +1,18 @@
+# Variables de R1 (identidad). Las contraseñas NO están aquí: se generan al
+# desplegar en ansible/credentials/ (ignorado por git) con lookup('password').
+ldap_domain: campus.lab
+ldap_base: dc=campus,dc=lab
+onos_nas_ip: 192.168.0.10
+# Usuarios de prueba: uid -> grupo de red (null = sin grupo, debe ser rechazado).
+# Precedencia de roles (LLSD §4.1): net-admin > net-administrativo > net-docente > net-alumno.
+usuarios_ldap:
+  admin01: net-admin
+  adm01: net-administrativo
+  doc01: net-docente
+  alu01: net-alumno
+  sing01: null
+# Qué usuario usa el supplicant de cada host en las pruebas.
+supplicant_usuario:
+  h1: admin01
+  h2: alu01
+  h4: doc01

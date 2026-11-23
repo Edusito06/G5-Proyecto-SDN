@@ -1,0 +1,101 @@
+---
+- name: Preparar el extremo LOCAL de los seis switches del bootstrap progresivo
+  hosts: ovs
+  become: true
+  gather_facts: false
+  strategy: linear
+  any_errors_fatal: true
+  vars:
+    paper_tree:
+      core-1: [dc-dist, r-sw1, r-sw2, s-dist]
+      core-2: [dc-dist]
+      dc-dist: [core-1, core-2, onos-1]
+      r-sw1: [core-1]
+      r-sw2: [core-1]
+      s-dist: [core-1]
+    paper_parent: "{{ 'onos-1' if inventory_hostname == 'dc-dist' else ('dc-dist' if inventory_hostname in ['core-1', 'core-2'] else 'core-1') }}"
+    paper_input:
+      ports: "{{ bootstrap_ports }}"
+      data_ports: "{{ vnrt_data_ports[inventory_hostname] }}"
+      mgmt_address: "{{ ansible_host }}"
+      parent: "{{ paper_parent }}"
+      address: "{{ bootstrap_ip }}"
+      migrate_previous: "{{ migrate_previous_bootstrap | default(false) | bool }}"
+  tasks:
+    - name: Validar el árbol y el inventario completo
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | sort == paper_tree.keys() | sort
+          - bootstrap_ports is mapping
+          - bootstrap_ports.keys() | sort == paper_tree[inventory_hostname] | sort
+          - vnrt_data_ports[inventory_hostname] is mapping
+          - (dc_onos_verified_mac | default('') | lower) == (vnrt_tree_ports['dc-dist']['onos-1'] | lower)
+          - bootstrap_ip is match('^10[.]100[.]0[.][3-8]$')
+          - groups['ovs'] | map('extract', hostvars, 'bootstrap_ip') | unique | length == 6
+        fail_msg: "Comprueba el inventario y confirma la MAC local del enlace DC-DIST → ONOS-1 mediante dc_onos_verified_mac."
+
+    - name: Identificar MAC y ofport y detectar conflictos sin modificar OVS
+      ansible.builtin.command:
+        argv: [python3, "-", check]
+        stdin: "{{ lookup('ansible.builtin.file', 'files/paper-bridge.py') }}"
+      environment:
+        PAPER_CONFIG: "{{ paper_input | to_json }}"
+      changed_when: false
+      register: resolved
+
+    - name: Publicar los números de puerto para la aplicación de ONOS
+      ansible.builtin.set_fact:
+        paper_ports: "{{ resolved.stdout | from_json }}"
+
+    - name: Instalar el preparador de reglas locales
+      ansible.builtin.copy:
+        src: files/paper-bridge.py
+        dest: /usr/local/sbin/g05-paper-bridge
+        mode: "0755"
+
+    - name: Guardar configuración por equipo
+      ansible.builtin.copy:
+        content: "{{ paper_input | combine({'ofports': paper_ports}) | to_nice_json }}\n"
+        dest: /etc/g05-paper-bridge.json
+        mode: "0644"
+
+    - name: Crear br0, asignar ofports y configurar el destino OpenFlow
+      ansible.builtin.command: /usr/local/sbin/g05-paper-bridge apply
+
+    - name: Registrar servicio de reglas del extremo
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/g05-paper-local.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Reglas ARP y OpenFlow del puerto LOCAL
+          After=openvswitch-switch.service
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/g05-paper-bridge restore
+
+    - name: Registrar verificación periódica de las reglas del extremo
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/g05-paper-local.timer
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Restaurar el extremo LOCAL después de reinicios
+          [Timer]
+          OnBootSec=5s
+          OnUnitInactiveSec=10s
+          AccuracySec=1s
+          [Install]
+          WantedBy=timers.target
+
+    - name: Habilitar la comprobación del extremo LOCAL
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+        name: g05-paper-local.timer
+        enabled: true
+        state: started
+
+    - name: Instalar las reglas iniciales del extremo
+      ansible.builtin.systemd_service:
+        name: g05-paper-local.service
+        state: started

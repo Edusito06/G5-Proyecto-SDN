@@ -1,0 +1,109 @@
+---
+- name: Asignar la dirección de control estática al puerto LOCAL de cada br0
+  hosts: ovs
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    local_network_file: /etc/systemd/network/05-vnrt-br0.network
+    previous_profile: |
+      [Match]
+      Name=br0
+      [Network]
+      Address={{ bootstrap_ip }}/28
+      DHCP=no
+      LinkLocalAddressing=no
+      IPv6AcceptRA=no
+    local_profile: "{{ previous_profile }}ConfigureWithoutCarrier=yes\n"
+
+  tasks:
+    - name: Validar las seis direcciones reservadas en el inventario
+      ansible.builtin.assert:
+        that:
+          - bootstrap_ip is defined and bootstrap_ip is match('^10[.]100[.]0[.][3-8]$')
+          - groups['ovs'] | length == 6
+          - groups['ovs'] | map('extract', hostvars, 'bootstrap_ip') | unique | length == 6
+
+    - name: Comprobar gestión, puerto LOCAL y configuración activa antes de cambiar nada
+      ansible.builtin.shell: |
+        set -eu
+        export LC_ALL=C
+        systemctl is-active --quiet systemd-networkd
+        ip -o -4 address show dev ens3 | awk -v want="$MANAGEMENT" '
+          {split($4,a,"/"); if (a[1]==want) found=1} END {exit !found}'
+        if ovs-vsctl iface-to-br ens3 >/dev/null 2>&1; then
+          echo "ens3 pertenece a un bridge OVS"; exit 1
+        fi
+        ovs-vsctl --timeout=5 br-exists br0
+        test "$(ovs-vsctl get Interface br0 type | tr -d '\"')" = internal
+        ip -o -4 address show | awk -v want="$ADDR" '
+          {split($4,a,"/"); if (($2=="br0" && $4!=want "/28") || ($2!="br0" && a[1]==want)) {
+            print "Conflicto de dirección: " $0; exit 1
+          }}'
+        profile=$(networkctl --no-pager --full status br0 | awk '/Network File:/ {print $NF; exit}')
+        case "$profile" in
+          n/a|"$FILE") ;;
+          *) echo "Revisar primero el perfil de br0: $profile"; exit 1 ;;
+        esac
+      environment:
+        MANAGEMENT: "{{ ansible_host }}"
+        ADDR: "{{ bootstrap_ip }}"
+        FILE: "{{ local_network_file }}"
+      changed_when: false
+
+    - name: Leer la huella del archivo persistente si existe
+      ansible.builtin.stat:
+        path: "{{ local_network_file }}"
+        checksum_algorithm: sha256
+      register: existing_profile
+
+    - name: Preservar cualquier configuración local distinta de las plantillas conocidas
+      ansible.builtin.assert:
+        that:
+          - >-
+            not existing_profile.stat.exists or
+            (existing_profile.stat.isreg and existing_profile.stat.checksum in
+            [previous_profile | hash('sha256'), local_profile | hash('sha256')])
+        fail_msg: "Revisa {{ local_network_file }}. Su contenido difiere del perfil VNRT esperado."
+
+    - name: Consultar el estado actual de la dirección de control
+      ansible.builtin.command: ip -j -4 address show dev br0
+      register: addr_before
+      changed_when: false
+
+    - name: Guardar el perfil del puerto interno
+      ansible.builtin.copy:
+        dest: "{{ local_network_file }}"
+        content: "{{ local_profile }}"
+        mode: "0644"
+        backup: true
+      register: installed_profile
+
+    - name: Levantar br0 y cargar el perfil cuando haya cambios o falte la IP
+      ansible.builtin.shell: |
+        set -eu
+        ip link set dev br0 up
+        networkctl reload
+        networkctl reconfigure br0
+      when: >-
+        installed_profile.changed or
+        'UP' not in (addr_before.stdout | from_json | first).flags or
+        bootstrap_ip not in ((addr_before.stdout | from_json | first).addr_info | map(attribute='local') | list)
+      changed_when: true
+
+    - name: Verificar la IP y el dispositivo elegido por el kernel para alcanzar ONOS
+      ansible.builtin.shell: |
+        set -eu
+        ip -o -4 address show dev br0 | awk -v want="$ADDR/28" '$4==want{ok=1}END{exit !ok}'
+        ip -4 route get 10.100.0.2 from "$ADDR" | grep -E '(^| )dev br0( |$)'
+      environment:
+        ADDR: "{{ bootstrap_ip }}"
+      register: local_status
+      until: local_status.rc == 0
+      retries: 6
+      delay: 2
+      changed_when: false
+
+    - name: Mostrar asignación verificada
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} br0/LOCAL {{ bootstrap_ip }}/28"

@@ -1,0 +1,179 @@
+---
+- name: Comprobar el paquete de la aplicación antes de modificar switches
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Leer paquete compilado
+      ansible.builtin.stat:
+        path: "{{ paper_oar | default(playbook_dir + '/paper-app/target/g05-inband-1.0.0.oar') }}"
+      register: artifact
+    - name: Exigir un OAR compilado en el nodo que ejecuta Ansible
+      ansible.builtin.assert:
+        that: artifact.stat.isreg | default(false)
+        fail_msg: "Compila primero paper-app con mvn clean package o indica la ruta absoluta con -e paper_oar=/ruta/al/archivo.oar."
+
+- name: Configurar el bootstrap reactivo en ONOS y verificar la convergencia
+  hosts: onos-1
+  any_errors_fatal: true
+  gather_facts: false
+  vars:
+    api: http://127.0.0.1:8181/onos/v1
+    component: org.g05.inband.Bootstrap
+    application: org.g05.inband
+    user_rest: "{{ onos_rest_user | default('onos') }}"
+  vars_prompt:
+    - name: onos_rest_password
+      prompt: Contraseña REST de ONOS-1
+      private: true
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ user_rest }}"
+      url_password: "{{ onos_rest_password }}"
+      force_basic_auth: true
+      use_proxy: false
+      follow_redirects: none
+      headers:
+        Accept: application/json
+  tasks:
+    - name: Confirmar que ONOS conserva las reglas del extremo LOCAL
+      ansible.builtin.uri:
+        url: "{{ api }}/configuration/org.onosproject.net.flow.impl.FlowRuleManager"
+      register: manager
+      no_log: true
+    - ansible.builtin.assert:
+        that: manager.json['org.onosproject.net.flow.impl.FlowRuleManager'].allowExtraneousRules | bool
+        fail_msg: "Ejecuta antes onos.yml para preparar el controlador."
+
+    - name: Identificar aplicaciones que podrían adelantar el reenvío del bootstrap
+      ansible.builtin.uri:
+        url: "{{ api }}/applications"
+      register: installed_apps
+      no_log: true
+    - name: Comprobar que el experimento parte con el tránsito de terceros aislado
+      vars:
+        conflicts: "{{ installed_apps.json.applications | selectattr('state', 'equalto', 'ACTIVE') | map(attribute='name') | intersect(['org.onosproject.fwd', 'org.onosproject.proxyarp', 'org.g05.protection']) }}"
+      ansible.builtin.assert:
+        that: conflicts | length == 0
+        fail_msg: "Hay aplicaciones que pueden reenviar o responder antes del bootstrap: {{ conflicts }}. Revisa su uso en el slice antes de desactivarlas."
+
+    - name: Conservar las credenciales en memoria durante esta ejecución
+      ansible.builtin.set_fact:
+        paper_rest_secret: "{{ onos_rest_password }}"
+      no_log: true
+
+- import_playbook: paper-bridges.yml
+- import_playbook: local-ip.yml
+
+- name: Activar la aplicación y comprobar sus caminos en ONOS
+  hosts: onos-1
+  any_errors_fatal: true
+  gather_facts: false
+  vars:
+    api: http://127.0.0.1:8181/onos/v1
+    component: org.g05.inband.Bootstrap
+    application: org.g05.inband
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ onos_rest_user | default('onos') }}"
+      url_password: "{{ paper_rest_secret }}"
+      force_basic_auth: true
+      use_proxy: false
+      follow_redirects: none
+      headers:
+        Accept: application/json
+  tasks:
+    - name: Habilitar el descubrimiento de enlaces LLDP
+      ansible.builtin.uri:
+        url: "{{ api }}/applications/org.onosproject.lldpprovider/active"
+        method: POST
+        status_code: [200, 204]
+      no_log: true
+    - name: Consultar si la aplicación ya está instalada
+      ansible.builtin.uri:
+        url: "{{ api }}/applications/{{ application }}"
+        status_code: [200, 404]
+      register: app
+      no_log: true
+    - name: Instalar el OAR mediante la API local de ONOS
+      ansible.builtin.uri:
+        url: "{{ api }}/applications?activate=false"
+        method: POST
+        src: "{{ paper_oar | default(playbook_dir + '/paper-app/target/g05-inband-1.0.0.oar') }}"
+        headers: {Content-Type: application/octet-stream, Accept: application/json}
+        status_code: [200, 201]
+      when: app.status == 404
+      no_log: true
+    - name: Activar la aplicación
+      ansible.builtin.uri:
+        url: "{{ api }}/applications/{{ application }}/active"
+        method: POST
+        status_code: [200, 204]
+      when: app.status == 404 or app.json.state != 'ACTIVE'
+      no_log: true
+    - name: Esperar a que el componente registre sus propiedades
+      ansible.builtin.uri:
+        url: "{{ api }}/configuration/{{ component }}"
+      register: config
+      until: config.status == 200 and 'rootPort' in config.json.get(component, {})
+      retries: 20
+      delay: 2
+      no_log: true
+
+    - name: Construir la lista de DPID del inventario
+      ansible.builtin.set_fact:
+        paper_dpids: "{{ paper_dpids | default({}) | combine({item: 'of:%016x' | format(hostvars[item].bootstrap_ip.split('.')[-1] | int)}) }}"
+      loop: "{{ groups['ovs'] }}"
+    - name: Pasar a ONOS puertos de infraestructura y conexiones esperadas
+      vars:
+        infra: >-
+          {%- set out = [] -%}
+          {%- for sw in groups.ovs -%}
+          {%- for port in hostvars[sw].paper_ports.values() -%}
+          {%- set _ = out.append(paper_dpids[sw] ~ '/' ~ port) -%}
+          {%- endfor -%}{%- endfor -%}
+          {{ out | join(',') }}
+        attachments: >-
+          {%- set out = [] -%}
+          {%- for sw in groups.ovs if sw != 'dc-dist' -%}
+          {%- set parent = 'dc-dist' if sw in ['core-1', 'core-2'] else 'core-1' -%}
+          {%- set _ = out.append(hostvars[sw].bootstrap_ip ~ '=' ~ paper_dpids[parent] ~ '/' ~ hostvars[parent].paper_ports[sw]) -%}
+          {%- endfor -%}
+          {{ out | join(',') }}
+      ansible.builtin.uri:
+        url: "{{ api }}/configuration/{{ component }}"
+        method: POST
+        body_format: json
+        body:
+          rootPort: "{{ hostvars['dc-dist'].paper_ports['onos-1'] | string }}"
+          ports: "{{ infra }}"
+          attachments: "{{ attachments }}"
+        status_code: [200, 204]
+      no_log: true
+    - name: Esperar que ONOS registre los seis DPID como disponibles
+      ansible.builtin.uri:
+        url: "{{ api }}/devices"
+      register: devices
+      until: >-
+        devices.status == 200 and
+        (paper_dpids.values() | list | difference(devices.json.devices | selectattr('available') | map(attribute='id') | list) | length == 0)
+      retries: 60
+      delay: 3
+      no_log: true
+    - ansible.builtin.debug:
+        msg: "{{ devices.json.devices | selectattr('available') | map(attribute='id') | list }}"
+    - name: Comprobar que existen reglas de tránsito instaladas por la aplicación en los dos nodos intermedios
+      ansible.builtin.uri:
+        url: "{{ api }}/flows/{{ item }}"
+      loop:
+        - "{{ paper_dpids['dc-dist'] }}"
+        - "{{ paper_dpids['core-1'] }}"
+      register: device_flows
+      until: >-
+        device_flows.status == 200 and
+        device_flows.json.flows | selectattr('appId', 'equalto', application)
+        | selectattr('state', 'equalto', 'ADDED') | list | length > 0
+      retries: 10
+      delay: 2
+      no_log: true

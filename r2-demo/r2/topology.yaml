@@ -1,0 +1,57 @@
+# Topología de demostración R2 sobre el slice VNRT (verificada con fdb de OVS).
+#
+#   controller --p1-- sw1(core) --p2-- sw2(acc1) --p2-- h1 (admin)
+#                          \                    \--p3-- h2 (alumno)
+#                           \--p3-- sw3(acc2) --p1-- h4 (invitado)
+#                                            \--p2-- h3 (servidores)
+#
+# Mapeo con G05 (LLSD §2.3): sw2 = acc1, sw3 = acc2, sw1 = dist-dc/core.
+# sw1 no tiene puertos libres, así que los servidores son alias de IP en h3.
+# estático: las vinculaciones salen de `usuarios`; dinámico: de las sesiones 802.1X
+# que mantiene identity (R1). En modo dinámico `usuarios` solo describe la
+# conexión física (MAC, switch y puerto); el rol y la IP los ignora.
+modo: dinamico
+
+switches:
+  sw1:
+    dpid: "of:0000000000000001"
+    funcion: core
+    mgmt: 192.168.0.11
+    puertos:
+      1: {iface: ens4, a: controller}
+      2: {iface: ens5, a: sw2, uplink: true}
+      3: {iface: ens6, a: sw3, uplink: true}
+  sw2:
+    dpid: "of:0000000000000002"
+    funcion: acceso
+    mgmt: 192.168.0.12
+    puertos:
+      1: {iface: ens4, a: sw1, uplink: true}
+      2: {iface: ens5, a: h1}
+      3: {iface: ens6, a: h2}
+  sw3:
+    dpid: "of:0000000000000003"
+    funcion: acceso
+    mgmt: 192.168.0.13
+    puertos:
+      1: {iface: ens6, a: h4}
+      2: {iface: ens5, a: h3}
+      3: {iface: ens4, a: sw1, uplink: true}
+
+# Vinculaciones puerto-MAC-IP-rol. En la Fase 1 las entrega este archivo;
+# cuando R1 esté listo las escribirá la app identity (misma estructura).
+# rol: 1 invitado, 2 alumno, 3 docente, 4 administrativo, 5 admin, 9 cuarentena
+usuarios:
+  h1: {mac: 'fa:16:3e:77:0b:5e', ip: 10.50.0.10, mascara: 24, rol: 5, switch: sw2,
+    puerto: 2}
+  h2: {mac: 'fa:16:3e:f3:f7:8d', ip: 10.20.0.10, mascara: 24, rol: 2, switch: sw2,
+    puerto: 3}
+  h4: {mac: 'fa:16:3e:99:3a:e3', ip: 10.10.0.10, mascara: 24, rol: 1, switch: sw3,
+    puerto: 1}
+
+# h3 es el servidor: sus puertos no llevan política R2.
+servidor:
+  h3: {mac: "fa:16:3e:d7:22:9e", switch: sw3, puerto: 2}
+
+# IP que representa "Internet" (rango de documentación) dentro de h3.
+internet_ip: 203.0.113.10

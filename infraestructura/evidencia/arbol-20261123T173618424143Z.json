@@ -1,0 +1,963 @@
+{
+    "http_devices": "200",
+    "switches": {
+        "core-1": {
+            "expected_dpid": "of:0000000000000003",
+            "issues": [],
+            "onos_available": true,
+            "onos_ports": {
+                "http": 200,
+                "ports": [
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "86:82:e0:76:a4:41",
+                            "portName": "br0"
+                        },
+                        "element": "of:0000000000000003",
+                        "isEnabled": true,
+                        "port": "local",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:87:39:99",
+                            "portName": "ens4"
+                        },
+                        "element": "of:0000000000000003",
+                        "isEnabled": false,
+                        "port": "1",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:1d:fd:02",
+                            "portName": "ens5"
+                        },
+                        "element": "of:0000000000000003",
+                        "isEnabled": false,
+                        "port": "2",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:25:3a:e9",
+                            "portName": "ens6"
+                        },
+                        "element": "of:0000000000000003",
+                        "isEnabled": true,
+                        "port": "3",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:8f:97:4b",
+                            "portName": "ens7"
+                        },
+                        "element": "of:0000000000000003",
+                        "isEnabled": true,
+                        "port": "4",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:5c:c7:27",
+                            "portName": "ens8"
+                        },
+                        "element": "of:0000000000000003",
+                        "isEnabled": true,
+                        "port": "5",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:2d:8d:3e",
+                            "portName": "ens9"
+                        },
+                        "element": "of:0000000000000003",
+                        "isEnabled": true,
+                        "port": "6",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    }
+                ]
+            },
+            "ovs": {
+                "controller_target": "tcp:10.100.0.2:6653",
+                "dpid": "of:0000000000000003",
+                "host": "core-1",
+                "ip": "10.100.0.3",
+                "is_connected": "true",
+                "issues": [],
+                "ports": {
+                    "ens4": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:87:39:99",
+                        "ofport": "1",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens5": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:1d:fd:02",
+                        "ofport": "2",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens6": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:25:3a:e9",
+                        "ofport": "3",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens7": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:8f:97:4b",
+                        "ofport": "4",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens8": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:5c:c7:27",
+                        "ofport": "5",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens9": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:2d:8d:3e",
+                        "ofport": "6",
+                        "state": "LIVE",
+                        "tree": true
+                    }
+                },
+                "raw_port_descriptions": "OFPST_PORT_DESC reply (OF1.3) (xid=0x2):\n 1(ens4): addr:fa:16:3e:87:39:99\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 2(ens5): addr:fa:16:3e:1d:fd:02\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 3(ens6): addr:fa:16:3e:25:3a:e9\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 4(ens7): addr:fa:16:3e:8f:97:4b\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 5(ens8): addr:fa:16:3e:5c:c7:27\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 6(ens9): addr:fa:16:3e:2d:8d:3e\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n LOCAL(br0): addr:86:82:e0:76:a4:41\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max",
+                "route": "10.100.0.2 from 10.100.0.3 dev br0 uid 0 \n    cache",
+                "tcp": "0      0      10.100.0.3:44910 10.100.0.2:6653",
+                "utc": "2026-11-23T17:36:04.739318+00:00"
+            }
+        },
+        "core-2": {
+            "expected_dpid": "of:0000000000000004",
+            "issues": [],
+            "onos_available": true,
+            "onos_ports": {
+                "http": 200,
+                "ports": [
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "da:8c:e4:71:98:46",
+                            "portName": "br0"
+                        },
+                        "element": "of:0000000000000004",
+                        "isEnabled": true,
+                        "port": "local",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:3f:b9:9f",
+                            "portName": "ens4"
+                        },
+                        "element": "of:0000000000000004",
+                        "isEnabled": false,
+                        "port": "1",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:01:e2:bd",
+                            "portName": "ens5"
+                        },
+                        "element": "of:0000000000000004",
+                        "isEnabled": false,
+                        "port": "2",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:57:c5:04",
+                            "portName": "ens6"
+                        },
+                        "element": "of:0000000000000004",
+                        "isEnabled": true,
+                        "port": "3",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:07:a7:08",
+                            "portName": "ens7"
+                        },
+                        "element": "of:0000000000000004",
+                        "isEnabled": false,
+                        "port": "4",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:4d:c5:b0",
+                            "portName": "ens8"
+                        },
+                        "element": "of:0000000000000004",
+                        "isEnabled": false,
+                        "port": "5",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:fc:94:92",
+                            "portName": "ens9"
+                        },
+                        "element": "of:0000000000000004",
+                        "isEnabled": false,
+                        "port": "6",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    }
+                ]
+            },
+            "ovs": {
+                "controller_target": "tcp:10.100.0.2:6653",
+                "dpid": "of:0000000000000004",
+                "host": "core-2",
+                "ip": "10.100.0.4",
+                "is_connected": "true",
+                "issues": [],
+                "ports": {
+                    "ens4": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:3f:b9:9f",
+                        "ofport": "1",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens5": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:01:e2:bd",
+                        "ofport": "2",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens6": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:57:c5:04",
+                        "ofport": "3",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens7": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:07:a7:08",
+                        "ofport": "4",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens8": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:4d:c5:b0",
+                        "ofport": "5",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens9": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:fc:94:92",
+                        "ofport": "6",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    }
+                },
+                "raw_port_descriptions": "OFPST_PORT_DESC reply (OF1.3) (xid=0x2):\n 1(ens4): addr:fa:16:3e:3f:b9:9f\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 2(ens5): addr:fa:16:3e:01:e2:bd\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 3(ens6): addr:fa:16:3e:57:c5:04\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 4(ens7): addr:fa:16:3e:07:a7:08\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 5(ens8): addr:fa:16:3e:4d:c5:b0\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 6(ens9): addr:fa:16:3e:fc:94:92\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n LOCAL(br0): addr:da:8c:e4:71:98:46\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max",
+                "route": "10.100.0.2 from 10.100.0.4 dev br0 uid 0 \n    cache",
+                "tcp": "0      0      10.100.0.4:60222 10.100.0.2:6653",
+                "utc": "2026-11-23T17:36:04.757586+00:00"
+            }
+        },
+        "dc-dist": {
+            "expected_dpid": "of:0000000000000005",
+            "issues": [],
+            "onos_available": true,
+            "onos_ports": {
+                "http": 200,
+                "ports": [
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "02:97:e1:27:b2:47",
+                            "portName": "br0"
+                        },
+                        "element": "of:0000000000000005",
+                        "isEnabled": true,
+                        "port": "local",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:7b:5f:5b",
+                            "portName": "ens4"
+                        },
+                        "element": "of:0000000000000005",
+                        "isEnabled": true,
+                        "port": "1",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:08:cc:60",
+                            "portName": "ens5"
+                        },
+                        "element": "of:0000000000000005",
+                        "isEnabled": true,
+                        "port": "2",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:5a:81:7d",
+                            "portName": "ens6"
+                        },
+                        "element": "of:0000000000000005",
+                        "isEnabled": true,
+                        "port": "3",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:28:e9:45",
+                            "portName": "ens7"
+                        },
+                        "element": "of:0000000000000005",
+                        "isEnabled": false,
+                        "port": "4",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:d3:a7:85",
+                            "portName": "ens8"
+                        },
+                        "element": "of:0000000000000005",
+                        "isEnabled": false,
+                        "port": "5",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:03:65:00",
+                            "portName": "ens9"
+                        },
+                        "element": "of:0000000000000005",
+                        "isEnabled": false,
+                        "port": "6",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    }
+                ]
+            },
+            "ovs": {
+                "controller_target": "tcp:10.100.0.2:6653",
+                "dpid": "of:0000000000000005",
+                "host": "dc-dist",
+                "ip": "10.100.0.5",
+                "is_connected": "true",
+                "issues": [],
+                "ports": {
+                    "ens4": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:7b:5f:5b",
+                        "ofport": "1",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens5": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:08:cc:60",
+                        "ofport": "2",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens6": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:5a:81:7d",
+                        "ofport": "3",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens7": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:28:e9:45",
+                        "ofport": "4",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens8": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:d3:a7:85",
+                        "ofport": "5",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens9": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:03:65:00",
+                        "ofport": "6",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    }
+                },
+                "raw_port_descriptions": "OFPST_PORT_DESC reply (OF1.3) (xid=0x2):\n 1(ens4): addr:fa:16:3e:7b:5f:5b\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 2(ens5): addr:fa:16:3e:08:cc:60\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 3(ens6): addr:fa:16:3e:5a:81:7d\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 4(ens7): addr:fa:16:3e:28:e9:45\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 5(ens8): addr:fa:16:3e:d3:a7:85\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 6(ens9): addr:fa:16:3e:03:65:00\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n LOCAL(br0): addr:02:97:e1:27:b2:47\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max",
+                "route": "10.100.0.2 from 10.100.0.5 dev br0 uid 0 \n    cache",
+                "tcp": "0      0      10.100.0.5:39086 10.100.0.2:6653",
+                "utc": "2026-11-23T17:36:04.662005+00:00"
+            }
+        },
+        "r-sw1": {
+            "expected_dpid": "of:0000000000000006",
+            "issues": [],
+            "onos_available": true,
+            "onos_ports": {
+                "http": 200,
+                "ports": [
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "c2:eb:58:85:5c:43",
+                            "portName": "br0"
+                        },
+                        "element": "of:0000000000000006",
+                        "isEnabled": true,
+                        "port": "local",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:26:1c:1a",
+                            "portName": "ens4"
+                        },
+                        "element": "of:0000000000000006",
+                        "isEnabled": true,
+                        "port": "1",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:2f:1b:9f",
+                            "portName": "ens5"
+                        },
+                        "element": "of:0000000000000006",
+                        "isEnabled": false,
+                        "port": "2",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:a3:ef:47",
+                            "portName": "ens6"
+                        },
+                        "element": "of:0000000000000006",
+                        "isEnabled": false,
+                        "port": "3",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:36:21:10",
+                            "portName": "ens7"
+                        },
+                        "element": "of:0000000000000006",
+                        "isEnabled": false,
+                        "port": "4",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:f4:2b:f3",
+                            "portName": "ens8"
+                        },
+                        "element": "of:0000000000000006",
+                        "isEnabled": false,
+                        "port": "5",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    }
+                ]
+            },
+            "ovs": {
+                "controller_target": "tcp:10.100.0.2:6653",
+                "dpid": "of:0000000000000006",
+                "host": "r-sw1",
+                "ip": "10.100.0.6",
+                "is_connected": "true",
+                "issues": [],
+                "ports": {
+                    "ens4": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:26:1c:1a",
+                        "ofport": "1",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens5": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:2f:1b:9f",
+                        "ofport": "2",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens6": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:a3:ef:47",
+                        "ofport": "3",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens7": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:36:21:10",
+                        "ofport": "4",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens8": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:f4:2b:f3",
+                        "ofport": "5",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    }
+                },
+                "raw_port_descriptions": "OFPST_PORT_DESC reply (OF1.3) (xid=0x2):\n 1(ens4): addr:fa:16:3e:26:1c:1a\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 2(ens5): addr:fa:16:3e:2f:1b:9f\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 3(ens6): addr:fa:16:3e:a3:ef:47\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 4(ens7): addr:fa:16:3e:36:21:10\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 5(ens8): addr:fa:16:3e:f4:2b:f3\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n LOCAL(br0): addr:c2:eb:58:85:5c:43\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max",
+                "route": "10.100.0.2 from 10.100.0.6 dev br0 uid 0 \n    cache",
+                "tcp": "0      0      10.100.0.6:38036 10.100.0.2:6653",
+                "utc": "2026-11-23T17:36:04.688134+00:00"
+            }
+        },
+        "r-sw2": {
+            "expected_dpid": "of:0000000000000007",
+            "issues": [],
+            "onos_available": true,
+            "onos_ports": {
+                "http": 200,
+                "ports": [
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "a6:48:21:9e:f7:4c",
+                            "portName": "br0"
+                        },
+                        "element": "of:0000000000000007",
+                        "isEnabled": true,
+                        "port": "local",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:46:e5:b9",
+                            "portName": "ens4"
+                        },
+                        "element": "of:0000000000000007",
+                        "isEnabled": true,
+                        "port": "1",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:ab:63:7b",
+                            "portName": "ens5"
+                        },
+                        "element": "of:0000000000000007",
+                        "isEnabled": false,
+                        "port": "2",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:49:cb:64",
+                            "portName": "ens6"
+                        },
+                        "element": "of:0000000000000007",
+                        "isEnabled": false,
+                        "port": "3",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:f8:b4:0a",
+                            "portName": "ens7"
+                        },
+                        "element": "of:0000000000000007",
+                        "isEnabled": false,
+                        "port": "4",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    }
+                ]
+            },
+            "ovs": {
+                "controller_target": "tcp:10.100.0.2:6653",
+                "dpid": "of:0000000000000007",
+                "host": "r-sw2",
+                "ip": "10.100.0.7",
+                "is_connected": "true",
+                "issues": [],
+                "ports": {
+                    "ens4": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:46:e5:b9",
+                        "ofport": "1",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens5": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:ab:63:7b",
+                        "ofport": "2",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens6": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:49:cb:64",
+                        "ofport": "3",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens7": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:f8:b4:0a",
+                        "ofport": "4",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    }
+                },
+                "raw_port_descriptions": "OFPST_PORT_DESC reply (OF1.3) (xid=0x2):\n 1(ens4): addr:fa:16:3e:46:e5:b9\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 2(ens5): addr:fa:16:3e:ab:63:7b\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 3(ens6): addr:fa:16:3e:49:cb:64\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 4(ens7): addr:fa:16:3e:f8:b4:0a\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n LOCAL(br0): addr:a6:48:21:9e:f7:4c\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max",
+                "route": "10.100.0.2 from 10.100.0.7 dev br0 uid 0 \n    cache",
+                "tcp": "0      0      10.100.0.7:34944 10.100.0.2:6653",
+                "utc": "2026-11-23T17:36:04.678411+00:00"
+            }
+        },
+        "s-dist": {
+            "expected_dpid": "of:0000000000000008",
+            "issues": [],
+            "onos_available": true,
+            "onos_ports": {
+                "http": 200,
+                "ports": [
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "02:eb:65:a2:d8:49",
+                            "portName": "br0"
+                        },
+                        "element": "of:0000000000000008",
+                        "isEnabled": true,
+                        "port": "local",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "enabled",
+                            "portMac": "fa:16:3e:a3:3e:6b",
+                            "portName": "ens4"
+                        },
+                        "element": "of:0000000000000008",
+                        "isEnabled": true,
+                        "port": "1",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:78:7d:4a",
+                            "portName": "ens5"
+                        },
+                        "element": "of:0000000000000008",
+                        "isEnabled": false,
+                        "port": "2",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    },
+                    {
+                        "annotations": {
+                            "adminState": "disabled",
+                            "portMac": "fa:16:3e:f0:f5:4a",
+                            "portName": "ens6"
+                        },
+                        "element": "of:0000000000000008",
+                        "isEnabled": false,
+                        "port": "3",
+                        "portSpeed": 0,
+                        "type": "copper"
+                    }
+                ]
+            },
+            "ovs": {
+                "controller_target": "tcp:10.100.0.2:6653",
+                "dpid": "of:0000000000000008",
+                "host": "s-dist",
+                "ip": "10.100.0.8",
+                "is_connected": "true",
+                "issues": [],
+                "ports": {
+                    "ens4": {
+                        "config": "0",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST",
+                            "UP",
+                            "LOWER_UP"
+                        ],
+                        "linux_operstate": "UP",
+                        "mac": "fa:16:3e:a3:3e:6b",
+                        "ofport": "1",
+                        "state": "LIVE",
+                        "tree": true
+                    },
+                    "ens5": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:78:7d:4a",
+                        "ofport": "2",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    },
+                    "ens6": {
+                        "config": "PORT_DOWN",
+                        "linux_flags": [
+                            "BROADCAST",
+                            "MULTICAST"
+                        ],
+                        "linux_operstate": "DOWN",
+                        "mac": "fa:16:3e:f0:f5:4a",
+                        "ofport": "3",
+                        "state": "LINK_DOWN",
+                        "tree": false
+                    }
+                },
+                "raw_port_descriptions": "OFPST_PORT_DESC reply (OF1.3) (xid=0x2):\n 1(ens4): addr:fa:16:3e:a3:3e:6b\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max\n 2(ens5): addr:fa:16:3e:78:7d:4a\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n 3(ens6): addr:fa:16:3e:f0:f5:4a\n     config:     PORT_DOWN\n     state:      LINK_DOWN\n     speed: 0 Mbps now, 0 Mbps max\n LOCAL(br0): addr:02:eb:65:a2:d8:49\n     config:     0\n     state:      LIVE\n     speed: 0 Mbps now, 0 Mbps max",
+                "route": "10.100.0.2 from 10.100.0.8 dev br0 uid 0 \n    cache",
+                "tcp": "0      0      10.100.0.8:33422 10.100.0.2:6653",
+                "utc": "2026-11-23T17:36:06.324192+00:00"
+            }
+        }
+    }
+}

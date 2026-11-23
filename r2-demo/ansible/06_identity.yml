@@ -1,0 +1,147 @@
+# Paso 6 (R1): servicio identity, DHCP por rol y clientes DHCP en los hosts.
+#
+#  * controller: dnsmasq (solo DHCP, un rango por rol, concede solo a MAC con sesión),
+#    el servicio identity (systemd) y los r2ctl/identity/policy/topology en /opt/r2.
+#  * hosts: isc-dhcp-client y la ayuda r1-up (802.1X + DHCP) y r1-down.
+#
+# Uso: ansible-playbook 06_identity.yml
+- name: identity y DHCP en el controller
+  hosts: onos
+  become: true
+  gather_facts: false
+  vars_files: [../r2/policy.yaml]
+  tasks:
+    - name: Instalar dnsmasq y curl
+      ansible.builtin.apt: {name: [dnsmasq, curl], state: present}
+      environment: {DEBIAN_FRONTEND: noninteractive}
+
+    - name: Direcciones .1 de cada subred de rol en ens4 (puertas de enlace virtuales)
+      ansible.builtin.shell: |
+        ip addr add 10.{{ item * 10 }}.0.1/24 dev ens4 2>&1 | grep -v "File exists" || true
+      loop: "{{ roles.keys() | list }}"
+      changed_when: false
+
+    - name: Configuración de dnsmasq (solo DHCP; concede a MAC con etiqueta de rol)
+      ansible.builtin.copy:
+        dest: /etc/dnsmasq.d/r1.conf
+        mode: "0644"
+        content: |
+          # Solo DHCP: el DNS de G11 es otro servicio.
+          port=0
+          interface=ens4
+          bind-interfaces
+          dhcp-authoritative
+          log-dhcp
+          # identity escribe aquí "<mac>,set:rol<N>" al autorizar una sesión.
+          dhcp-hostsdir=/etc/dnsmasq.d/hosts.d
+          dhcp-script=/usr/local/bin/r1-dhcp-hook
+          # Un rango por rol, solo para quien tenga la etiqueta (LLSD §2.2).
+          {% for r, d in roles.items() | sort %}
+          dhcp-range=tag:rol{{ r }},10.{{ r * 10 }}.0.10,10.{{ r * 10 }}.0.250,255.255.255.0,{{ '120s' if r in [1, 9] else '8h' }}
+          {% endfor %}
+          # Sin router: la intranet y "Internet" quedan en el enlace (el pipeline decide).
+          dhcp-option=3
+          dhcp-option=121,10.0.0.0/8,0.0.0.0,203.0.113.0/24,0.0.0.0
+
+    - name: Directorio de concesiones por etiqueta
+      ansible.builtin.file: {path: /etc/dnsmasq.d/hosts.d, state: directory, mode: "0755"}
+
+    - name: Ayuda dhcp-script (avisa a identity de cada concesión)
+      ansible.builtin.copy:
+        dest: /usr/local/bin/r1-dhcp-hook
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # dnsmasq: $1 = add|old|del|init   $2 = MAC   $3 = IP
+          case "$1" in add|old|del) ;; *) exit 0;; esac
+          curl -s -m 5 -X POST -H 'Content-Type: application/json' \
+            -d "{\"ev\":\"$1\",\"mac\":\"$2\",\"ip\":\"$3\"}" \
+            http://127.0.0.1:5001/identity/dhcp >/dev/null
+
+    - name: Directorio /opt/r2
+      ansible.builtin.file: {path: /opt/r2, state: directory, mode: "0755"}
+
+    - name: Código de r2ctl e identity en /opt/r2
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../r2/{{ item }}"
+        dest: "/opt/r2/{{ item }}"
+        mode: "0644"
+      loop: [r2ctl.py, identity.py, policy.yaml, topology.yaml]
+      notify: reiniciar identity
+
+    - name: Directorio de estado
+      ansible.builtin.file: {path: /var/lib/r2, state: directory, mode: "0755"}
+
+    - name: Unidad systemd de identity
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/r1-identity.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=R1 identity (G05)
+          After=docker.service network-online.target
+          Wants=docker.service
+          [Service]
+          # curl -n lee ~/.netrc del usuario ubuntu para llamar a la REST de ONOS.
+          Environment=HOME=/home/ubuntu
+          ExecStart=/usr/bin/python3 /opt/r2/identity.py
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      notify: reiniciar identity
+
+    - name: Arrancar dnsmasq e identity
+      ansible.builtin.systemd: {name: "{{ item }}", state: restarted, enabled: true, daemon_reload: true}
+      loop: [r1-identity, dnsmasq]
+
+  handlers:
+    - name: reiniciar identity
+      ansible.builtin.systemd: {name: r1-identity, state: restarted, daemon_reload: true}
+
+- name: Clientes DHCP en los hosts
+  hosts: endpoints:!identidad
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Instalar el cliente DHCP
+      ansible.builtin.apt: {name: isc-dhcp-client, state: present}
+      environment: {DEBIAN_FRONTEND: noninteractive}
+
+    - name: Ayudas r1-up y r1-down
+      ansible.builtin.copy:
+        dest: "/usr/local/bin/{{ item.n }}"
+        mode: "0755"
+        content: "{{ item.c }}"
+      loop:
+        - n: r1-up
+          c: |
+            #!/bin/bash
+            # r1-up <usuario> | --guest : 802.1X (o invitado) y DHCP en ens4.
+            ARG=${1:-}
+            pkill -f "wpa_supplicant.*-i ens4" 2>/dev/null
+            pkill -f "dhclient.*ens4" 2>/dev/null
+            ip addr flush dev ens4; ip link set ens4 up
+            if [ "$ARG" != "--guest" ] && [ -n "$ARG" ]; then
+              CONF=/etc/wpa_supplicant/r1-${ARG}.conf
+              [ -f "$CONF" ] || { echo "no existe $CONF"; exit 1; }
+              r1-login "$CONF" >/dev/null 2>&1
+              sleep 6        # handshake + que identity abra la ventana DHCP
+            fi
+            rm -f /var/lib/dhcp/dhclient.ens4.leases
+            # La salida va a un archivo: sin oferta, dhclient se queda en segundo plano
+            # y retendría una tubería abierta.
+            timeout 25 dhclient -1 ens4 >/tmp/r1-dhclient.log 2>&1 </dev/null
+            if ! ip -4 -br addr show ens4 | grep -q "[0-9]/[0-9]"; then
+              pkill -f "dhclient.*ens4" 2>/dev/null
+              echo "sin IP: no hubo oferta DHCP (puerto cerrado o sin sesión)"
+            fi
+            ip -4 -br addr show ens4
+        - n: r1-down
+          c: |
+            #!/bin/sh
+            # Cierra la sesión 802.1X y libera la IP.
+            wpa_cli -i ens4 logoff >/dev/null 2>&1
+            pkill -f "wpa_supplicant.*-i ens4" 2>/dev/null
+            pkill -f "dhclient.*ens4" 2>/dev/null
+            ip addr flush dev ens4

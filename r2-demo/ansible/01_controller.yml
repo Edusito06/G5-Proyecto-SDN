@@ -1,0 +1,38 @@
+# Paso 1: ONOS 2.7.0 en el controller (Docker) con las apps mínimas.
+# Sin proxyarp ni fwd: el reenvío lo programa r2ctl de forma proactiva.
+# Uso: ansible-playbook 01_controller.yml
+- name: ONOS en el controller
+  hosts: onos
+  become: true
+  gather_facts: false
+  vars:
+    onos_image: onosproject/onos:2.7.0
+    onos_apps: "gui2,drivers,openflow"
+    java_opts: "-Xms1g -Xmx3g"
+  tasks:
+    - name: Instalar Docker y utilidades
+      ansible.builtin.apt:
+        name: [docker.io, python3-yaml, python3-requests, curl, jq, tshark]
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Docker activo
+      ansible.builtin.systemd: {name: docker, state: started, enabled: true}
+
+    - name: ¿Existe ya el contenedor onos?
+      ansible.builtin.command: docker ps -a -q --filter name=^onos$
+      register: onos_ct
+      changed_when: false
+
+    - name: Levantar ONOS
+      ansible.builtin.command: >-
+        docker run -d --name onos --network host --restart unless-stopped
+        -e ONOS_APPS={{ onos_apps }} -e JAVA_OPTS="{{ java_opts }}"
+        {{ onos_image }}
+      when: onos_ct.stdout == ""
+
+    - name: Esperar OpenFlow (6653) y REST (8181)
+      ansible.builtin.wait_for: {host: 127.0.0.1, port: "{{ item }}", timeout: 300}
+      loop: [6653, 8181]

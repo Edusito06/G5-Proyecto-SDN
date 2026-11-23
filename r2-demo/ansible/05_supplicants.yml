@@ -1,0 +1,91 @@
+# Paso 5 (R1): wpa_supplicant con EAP-TLS en h1, h2 y h4 (puerto cerrado hasta
+# autenticar). Los certificados de cliente los emite la CA de h3 (04_identidad)
+# y viajan por el Mac a credentials/pki/ (ignorado por git).
+#
+# VNRT descarta la dirección de grupo 01:80:c2:00:00:03 que usa EAPOL (riesgo V6
+# del LLSD), así que r1-login reescribe el destino de las tramas EAPOL salientes a
+# broadcast con tc. Las respuestas del authenticator van por unicast.
+#
+# Uso: ansible-playbook 05_supplicants.yml
+- name: Bajar los certificados de la CA (h3) al Mac
+  hosts: identidad
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.fetch:
+        src: "/etc/freeradius/3.0/certs-r1/{{ item }}"
+        dest: "{{ playbook_dir }}/credentials/pki/"
+        flat: true
+      loop: "{{ ['ca.pem'] + (usuarios_ldap.keys() | map('regex_replace', '^(.*)$', 'clientes/\\1.pem') | list)
+                 + (usuarios_ldap.keys() | map('regex_replace', '^(.*)$', 'clientes/\\1.key') | list) }}"
+      no_log: true
+
+- name: Supplicants 802.1X (EAP-TLS)
+  hosts: endpoints:!identidad
+  become: true
+  gather_facts: false
+  vars:
+    usuario: "{{ supplicant_usuario[inventory_hostname] }}"
+  tasks:
+    - name: Instalar wpa_supplicant e iproute2 (tc)
+      ansible.builtin.apt: {name: [wpasupplicant, iproute2], state: present}
+      environment: {DEBIAN_FRONTEND: noninteractive}
+
+    - name: Directorio de certificados
+      ansible.builtin.file: {path: /etc/wpa_supplicant/pki, state: directory, mode: "0700"}
+
+    - name: Certificados de la CA y de todos los usuarios de prueba (demo)
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/credentials/pki/{{ item }}"
+        dest: "/etc/wpa_supplicant/pki/{{ item }}"
+        mode: "0600"
+      loop: "{{ ['ca.pem'] + (usuarios_ldap.keys() | map('regex_replace', '^(.*)$', '\\1.pem') | list)
+                 + (usuarios_ldap.keys() | map('regex_replace', '^(.*)$', '\\1.key') | list) }}"
+      no_log: true
+
+    - name: Una configuración 802.1X por usuario
+      ansible.builtin.copy:
+        dest: "/etc/wpa_supplicant/r1-{{ item }}.conf"
+        mode: "0600"
+        content: |
+          ctrl_interface=/run/wpa_supplicant
+          ap_scan=0
+          network={
+              key_mgmt=IEEE8021X
+              eap=TLS
+              identity="{{ item }}"
+              ca_cert="/etc/wpa_supplicant/pki/ca.pem"
+              client_cert="/etc/wpa_supplicant/pki/{{ item }}.pem"
+              private_key="/etc/wpa_supplicant/pki/{{ item }}.key"
+              eapol_flags=0
+          }
+      loop: "{{ usuarios_ldap.keys() | list }}"
+
+    - name: Configuración por defecto del host
+      ansible.builtin.copy:
+        remote_src: true
+        src: "/etc/wpa_supplicant/r1-{{ usuario }}.conf"
+        dest: /etc/wpa_supplicant/r1.conf
+        mode: "0600"
+
+    - name: Ayudas r1-login y r1-status
+      ansible.builtin.copy:
+        dest: "/usr/local/bin/{{ item.n }}"
+        mode: "0755"
+        content: "{{ item.c }}"
+      loop:
+        - n: r1-login
+          c: |
+            #!/bin/sh
+            # Inicia 802.1X en ens4. Acepta otro archivo de configuración como $1.
+            CONF=${1:-/etc/wpa_supplicant/r1.conf}
+            # VNRT no reenvía 01:80:c2:00:00:03: el EAPOL saliente va a broadcast.
+            tc qdisc replace dev ens4 clsact 2>/dev/null
+            tc filter replace dev ens4 egress prio 1 protocol 0x888e flower \
+               dst_mac 01:80:c2:00:00:03 action pedit ex munge eth dst set ff:ff:ff:ff:ff:ff pipe
+            pkill -f "wpa_supplicant.*-i ens4" 2>/dev/null; sleep 1
+            wpa_supplicant -B -D wired -i ens4 -c "$CONF" -P /run/wpa-r1.pid -f /tmp/wpa-r1.log
+        - n: r1-status
+          c: |
+            #!/bin/sh
+            wpa_cli -i ens4 status 2>&1 | grep -E "EAP state|suppPortStatus|selectedMethod|Supplicant PAE|^Failed"

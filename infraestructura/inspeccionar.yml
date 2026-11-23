@@ -1,0 +1,19 @@
+---
+- name: Inventariar interfaces y puertos OVS para cruzarlos con el cableado VNRT
+  hosts: ovs
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Leer nombre e identidad de cada interfaz
+      ansible.builtin.command: ip -br link
+      register: interfaces
+      changed_when: false
+
+    - name: Leer bridges, puertos asignados y controladores actuales
+      ansible.builtin.command: ovs-vsctl --timeout=5 show
+      register: bridges
+      changed_when: false
+
+    - name: Mostrar resultados
+      ansible.builtin.debug:
+        msg: "{{ interfaces.stdout_lines + bridges.stdout_lines }}"

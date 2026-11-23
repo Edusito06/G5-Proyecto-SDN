@@ -1,0 +1,271 @@
+---
+- name: Levantar ONOS-1 para el control in-band
+  hosts: onos-1
+  become: true
+  gather_facts: false
+  vars:
+    controller_ip: 10.100.0.2
+    onos_image: onosproject/onos:2.7.0
+    onos_container: onos
+    onos_rest_user: onos
+    onos_api: http://127.0.0.1:8181/onos/v1
+    flow_manager: org.onosproject.net.flow.impl.FlowRuleManager
+  vars_prompt:
+    - name: onos_rest_password
+      prompt: Contraseña REST de ONOS-1
+      private: true
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ onos_rest_user }}"
+      url_password: "{{ onos_rest_password }}"
+      force_basic_auth: true
+      use_proxy: false
+      follow_redirects: none
+      headers:
+        Accept: application/json
+  tasks:
+    - name: Medir bloques e inodos disponibles para ubuntu antes de crear temporales
+      become: false
+      ansible.builtin.raw: |
+        df -hP /home/ubuntu
+        df -iP /home/ubuntu
+        python3 -c 'import os,sys; s=os.statvfs("/home/ubuntu"); sys.exit(int(s.f_bavail == 0 or s.f_favail == 0))'
+      register: disk_check
+      changed_when: false
+    - name: Mostrar el espacio disponible en ONOS-1
+      ansible.builtin.debug:
+        var: disk_check.stdout_lines
+    - name: Recoger los datos de red de ONOS-1
+      ansible.builtin.setup:
+        gather_subset: ['!all', network]
+    - name: Confirmar la IP de control en ens4 y el secreto de la API
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.get('ens4', {}).get('ipv4', {}).get('address') == controller_ip
+          - onos_rest_password is defined and onos_rest_password | length > 0
+        fail_msg: Configura la IP de control en ens4 e introduce la contraseña REST de ONOS.
+
+    - name: Detectar una instancia que ya atiende REST en esta VM
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/cluster"
+      register: onos_probe
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Buscar una instalación nativa de ONOS
+      ansible.builtin.service_facts:
+      when: onos_probe.status == -1
+
+    - name: Iniciar la instalación nativa existente
+      ansible.builtin.systemd_service:
+        name: onos.service
+        state: started
+      when: onos_probe.status == -1 and 'onos.service' in ansible_facts.services
+
+    - name: Arrancar ONOS en Docker si no existe servicio nativo y REST está libre
+      when: onos_probe.status == -1 and 'onos.service' not in ansible_facts.services
+      block:
+        - name: Localizar Docker en el PATH o en Snap
+          ansible.builtin.shell: |
+            command -v docker || { test -x /snap/bin/docker && echo /snap/bin/docker; }
+          register: docker_cli
+          failed_when: docker_cli.rc not in [0, 1]
+          changed_when: false
+
+        - name: Instalar Docker si esta VM carece del cliente
+          when: docker_cli.rc != 0
+          block:
+            - name: Intentar instalar Docker con los índices disponibles
+              ansible.builtin.command:
+                argv: [apt-get, -o, 'DPkg::Lock::Timeout=60', --no-install-recommends, --no-remove, -y, install, docker.io]
+              environment:
+                DEBIAN_FRONTEND: noninteractive
+              register: docker_install
+              failed_when: false
+              changed_when: docker_install.rc == 0
+
+            - name: Revisar el entorno si la instalación necesita recuperación
+              when: docker_install.rc != 0
+              block:
+                - name: Mostrar el error de instalación de docker.io
+                  ansible.builtin.debug:
+                    msg: "{{ docker_install.stderr_lines }}"
+                - name: Consultar espacio, inodos, ruta IPv4 y DNS de gestión
+                  ansible.builtin.shell: |
+                    df -h / /var/lib/apt
+                    df -i / /var/lib/apt
+                    ip -4 route
+                    resolvectl dns ens3 || cat /etc/resolv.conf
+                    apt-cache policy docker.io
+                  register: apt_context
+                  changed_when: false
+                - ansible.builtin.debug:
+                    var: apt_context.stdout_lines
+                - name: Comprobar resolución de ambos repositorios antes de reintentar
+                  ansible.builtin.shell: |
+                    getent ahostsv4 pe.archive.ubuntu.com >/dev/null &&
+                    getent ahostsv4 security.ubuntu.com >/dev/null
+                  register: repo_dns
+                  changed_when: false
+                  failed_when: false
+                - name: Recuperar la salida de gestión de ONOS-1 si falla su DNS
+                  ansible.builtin.include_tasks: dns-gestion.yml
+                  when: repo_dns.rc != 0
+                - name: Actualizar índices y mostrar el error nativo del repositorio si falla
+                  ansible.builtin.command:
+                    argv: [apt-get, -o, 'APT::Update::Error-Mode=any', -o, 'Acquire::Retries=1', -o, 'Acquire::http::Timeout=15', -o, 'Acquire::https::Timeout=15', update]
+                - name: Instalar Docker con los índices nuevos
+                  ansible.builtin.command:
+                    argv: [apt-get, -o, 'DPkg::Lock::Timeout=60', --no-install-recommends, --no-remove, -y, install, docker.io]
+                  environment:
+                    DEBIAN_FRONTEND: noninteractive
+
+        - name: Seleccionar el ejecutable de Docker encontrado
+          ansible.builtin.set_fact:
+            docker_binary: "{{ docker_cli.stdout | trim if docker_cli.rc == 0 else '/usr/bin/docker' }}"
+
+        - name: Iniciar el servicio Docker
+          ansible.builtin.systemd_service:
+            name: "{{ 'snap.docker.dockerd.service' if docker_binary == '/snap/bin/docker' else 'docker.service' }}"
+            enabled: true
+            state: started
+
+        - name: Leer el estado del contenedor del laboratorio
+          ansible.builtin.command:
+            argv:
+              - "{{ docker_binary }}"
+              - container
+              - ls
+              - --all
+              - --filter
+              - "name=^/{{ onos_container }}$"
+              - --format
+              - "{% raw %}{{.State}}{% endraw %}"
+          changed_when: false
+          register: onos_state
+
+        - name: Crear una instancia individual cuando falta el contenedor
+          ansible.builtin.command:
+            argv:
+              - "{{ docker_binary }}"
+              - run
+              - --detach
+              - --name
+              - "{{ onos_container }}"
+              - --restart
+              - unless-stopped
+              - --publish
+              - "{{ controller_ip }}:6653:6653"
+              - --publish
+              - 127.0.0.1:8181:8181
+              - --env
+              - ONOS_APPS=drivers,openflow
+              - "{{ onos_image }}"
+          changed_when: true
+          when: onos_state.stdout | trim == ''
+
+        - name: Iniciar el contenedor existente
+          ansible.builtin.command:
+            argv: ["{{ docker_binary }}", start, "{{ onos_container }}"]
+          changed_when: true
+          when: onos_state.stdout | trim in ['exited', 'created']
+
+    - name: Esperar la API y comprobar el clúster de un solo nodo
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/cluster"
+        status_code: [200, 401, 403]
+      register: onos_cluster
+      until: onos_cluster.status in [200, 401, 403]
+      retries: 60
+      delay: 4
+      no_log: true
+
+    - name: Confirmar que ONOS informa exactamente un nodo
+      ansible.builtin.assert:
+        that:
+          - onos_cluster.status == 200
+          - onos_cluster.json.nodes | length == 1
+        fail_msg: "REST devolvió {{ onos_cluster.status }}. Verifica las credenciales REST y que el clúster tenga un nodo."
+
+    - name: Consultar la política de reconciliación de reglas en ONOS
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/configuration/{{ flow_manager }}"
+      register: flow_config
+      until: >-
+        flow_config.status in [401, 403] or
+        (flow_config.status == 200 and flow_config.json[flow_manager].allowExtraneousRules is defined)
+      retries: 15
+      delay: 3
+      failed_when: false
+      ignore_errors: true
+      no_log: true
+
+    - name: Confirmar que la versión instalada admite las reglas locales de bootstrap
+      ansible.builtin.assert:
+        that:
+          - flow_config.status == 200
+          - flow_config.json[flow_manager].allowExtraneousRules is defined
+        fail_msg: "Consulta a FlowRuleManager: HTTP {{ flow_config.status | default('sin respuesta') }}. Se esperaba la propiedad allowExtraneousRules."
+
+    - name: Conservar las reglas de tránsito de control instaladas por bootstrap
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/configuration/{{ flow_manager }}"
+        method: POST
+        body_format: json
+        body:
+          allowExtraneousRules: "true"
+        status_code: [200, 204]
+      when: not (flow_config.json[flow_manager].allowExtraneousRules | bool)
+      changed_when: true
+      no_log: true
+
+    - name: Verificar la política efectiva antes de conectar switches
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/configuration/{{ flow_manager }}"
+      register: effective_flow_config
+      until: >-
+        effective_flow_config.status == 200 and
+        effective_flow_config.json[flow_manager].allowExtraneousRules | bool
+      retries: 10
+      delay: 2
+      no_log: true
+
+    - name: Leer el estado del proveedor OpenFlow
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/applications/org.onosproject.openflow"
+      register: onos_provider
+      no_log: true
+
+    - name: Activar el proveedor OpenFlow si está inactivo
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/applications/org.onosproject.openflow/active"
+        method: POST
+      when: onos_provider.json.state != 'ACTIVE'
+      changed_when: true
+      no_log: true
+
+    - name: Comprobar que el proveedor terminó de arrancar
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/applications/org.onosproject.openflow/health"
+      register: onos_health
+      until: onos_health.status == 200 and onos_health.json.message == 'ready'
+      retries: 30
+      delay: 3
+      no_log: true
+
+    - name: Comprobar el socket OpenFlow en la dirección de datos de ONOS-1
+      ansible.builtin.wait_for:
+        host: "{{ controller_ip }}"
+        port: 6653
+        timeout: 120
+
+    - name: Consultar los dispositivos descubiertos
+      ansible.builtin.uri:
+        url: "{{ onos_api }}/devices"
+      register: onos_devices
+      no_log: true
+
+    - name: Mostrar los switches disponibles en ONOS
+      ansible.builtin.debug:
+        msg: "{{ onos_devices.json.devices | selectattr('available') | map(attribute='id') | list }}"

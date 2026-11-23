@@ -1,0 +1,55 @@
+# Enlaces de VNRT. DC-DIST ens5 hacia Core-2 y ens6 hacia ONOS-1 confirmados.
+dc_onos_verified_mac: "fa:16:3e:5a:81:7d"
+vnrt_tree_ports:
+  core-1: {dc-dist: "fa:16:3e:25:3a:e9", r-sw1: "fa:16:3e:8f:97:4b", r-sw2: "fa:16:3e:5c:c7:27", s-dist: "fa:16:3e:2d:8d:3e"}
+  core-2: {dc-dist: "fa:16:3e:57:c5:04"}
+  dc-dist: {core-1: "fa:16:3e:7b:5f:5b", core-2: "fa:16:3e:08:cc:60", onos-1: "fa:16:3e:5a:81:7d"}
+  r-sw1: {core-1: "fa:16:3e:26:1c:1a"}
+  r-sw2: {core-1: "fa:16:3e:46:e5:b9"}
+  s-dist: {core-1: "fa:16:3e:a3:3e:6b"}
+vnrt_data_ports:
+  core-1:
+    ens4: "fa:16:3e:87:39:99"
+    ens5: "fa:16:3e:1d:fd:02"
+    ens6: "fa:16:3e:25:3a:e9"
+    ens7: "fa:16:3e:8f:97:4b"
+    ens8: "fa:16:3e:5c:c7:27"
+    ens9: "fa:16:3e:2d:8d:3e"
+  core-2:
+    ens4: "fa:16:3e:3f:b9:9f"
+    ens5: "fa:16:3e:01:e2:bd"
+    ens6: "fa:16:3e:57:c5:04"
+    ens7: "fa:16:3e:07:a7:08"
+    ens8: "fa:16:3e:4d:c5:b0"
+    ens9: "fa:16:3e:fc:94:92"
+  dc-dist:
+    ens4: "fa:16:3e:7b:5f:5b"
+    ens5: "fa:16:3e:08:cc:60"
+    ens6: "fa:16:3e:5a:81:7d"
+    ens7: "fa:16:3e:28:e9:45"
+    ens8: "fa:16:3e:d3:a7:85"
+    ens9: "fa:16:3e:03:65:00"
+  r-sw1:
+    ens4: "fa:16:3e:26:1c:1a"
+    ens5: "fa:16:3e:2f:1b:9f"
+    ens6: "fa:16:3e:a3:ef:47"
+    ens7: "fa:16:3e:36:21:10"
+    ens8: "fa:16:3e:f4:2b:f3"
+  r-sw2:
+    ens4: "fa:16:3e:46:e5:b9"
+    ens5: "fa:16:3e:ab:63:7b"
+    ens6: "fa:16:3e:49:cb:64"
+    ens7: "fa:16:3e:f8:b4:0a"
+  s-dist:
+    ens4: "fa:16:3e:a3:3e:6b"
+    ens5: "fa:16:3e:78:7d:4a"
+    ens6: "fa:16:3e:f0:f5:4a"
+
+# Puertos físicos entre switches y hacia el controlador. ens3 queda fuera.
+vnrt_fabric:
+  core-1: {dc-dist: ens6, core-2: ens5, r-sw1: ens7, r-sw2: ens8, s-dist: ens9}
+  core-2: {dc-dist: ens6, core-1: ens5, r-sw1: ens7, r-sw2: ens8, s-dist: ens9}
+  dc-dist: {core-1: ens4, core-2: ens5, onos-1: ens6}
+  r-sw1: {core-1: ens4, core-2: ens5, r-sw2: ens8}
+  r-sw2: {core-1: ens4, core-2: ens5, r-sw1: ens7}
+  s-dist: {core-1: ens4, core-2: ens5}

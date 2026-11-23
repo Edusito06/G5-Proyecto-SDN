@@ -1,0 +1,69 @@
+# Paso 3: hosts de la demo. h1, h2 y h4 reciben la IP de su rol; h3 hace de
+# servidor con un alias de IP por recurso (G01..G12) y la IP de "Internet".
+# Los cambios con `ip` no persisten tras reiniciar: 99_reset.yml los revierte.
+# Uso: ansible-playbook 03_endpoints.yml
+- name: Hosts de la demo
+  hosts: endpoints
+  become: true
+  gather_facts: false
+  vars_files: [../r2/topology.yaml, ../r2/policy.yaml]
+  tasks:
+    - name: Utilidades de prueba
+      ansible.builtin.apt:
+        name: [netcat-openbsd, iputils-ping, tcpdump, iperf3]
+        state: present
+      environment: {DEBIAN_FRONTEND: noninteractive}
+
+    - name: Vaciar ens4 y quitar rp_filter
+      ansible.builtin.shell: |
+        ip addr flush dev ens4
+        sysctl -qw net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.ens4.rp_filter=0
+        ip link set ens4 up
+      changed_when: true
+
+    - name: IP del rol (usuarios)
+      ansible.builtin.shell: |
+        ip addr add {{ usuarios[inventory_hostname].ip }}/{{ usuarios[inventory_hostname].mascara }} dev ens4
+        ip route replace 10.0.0.0/8 dev ens4 scope link
+        ip route replace 203.0.113.0/24 dev ens4 scope link
+      when: inventory_hostname in usuarios
+      changed_when: true
+
+    - name: Alias del servidor (un /32 por recurso más Internet)
+      ansible.builtin.shell: |
+        {% for g in recursos.values() %}
+        ip addr add {{ g.ip }}/32 dev ens4
+        {% endfor %}
+        ip addr add {{ internet_ip }}/32 dev ens4
+        ip route replace 10.0.0.0/8 dev ens4 scope link
+      when: inventory_hostname in servidor
+      changed_when: true
+
+    - name: Servicios de prueba en h3
+      when: inventory_hostname in servidor
+      block:
+        - name: Directorio y script
+          ansible.builtin.file: {path: /opt/r2, state: directory, mode: "0755"}
+        - ansible.builtin.copy: {src: files/svc.py, dest: /opt/r2/svc.py, mode: "0755"}
+        - name: Especificación de los listeners
+          ansible.builtin.copy:
+            dest: /opt/r2/svc.json
+            content: |
+              {% set out = [{'name': 'internet', 'ip': internet_ip, 'tcp': [80, 443]}] %}
+              {% for k, g in recursos.items() %}
+              {% set _ = out.append({'name': g.nombre, 'ip': g.ip, 'tcp': [80, 443], 'udp': ([53] if k == 'G11' else [])}) %}
+              {% endfor %}
+              {{ out | to_json }}
+        - name: Unidad systemd
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/r2-svc.service
+            content: |
+              [Unit]
+              Description=Servidores de prueba R2
+              After=network.target
+              [Service]
+              ExecStart=/usr/bin/python3 /opt/r2/svc.py /opt/r2/svc.json
+              Restart=always
+              [Install]
+              WantedBy=multi-user.target
+        - ansible.builtin.systemd: {name: r2-svc, state: restarted, enabled: true, daemon_reload: true}

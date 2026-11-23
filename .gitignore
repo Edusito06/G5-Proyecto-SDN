@@ -1,0 +1,16 @@
+# Secretos generados por Ansible (contraseñas, secreto RADIUS, claves y certificados)
+credentials/
+.netrc
+*.key
+
+# Entornos y artefactos locales
+.venv/
+__pycache__/
+*.pyc
+*.retry
+*.log
+.DS_Store
+
+# Compilación de la app ONOS (se conserva solo el OAR publicado)
+infraestructura/paper-app/target/*
+!infraestructura/paper-app/target/g05-inband-1.0.0.oar

@@ -1,0 +1,106 @@
+---
+- name: Instalar Kea DHCPv4 para alumnos en el slice G05
+  hosts: dhcp
+  become: true
+  gather_facts: true
+  vars:
+    dhcp_interface: ens4
+    dhcp_server_ip: 10.100.1.130
+    dhcp_client_subnet: 10.20.0.0/24
+    dhcp_pool: 10.20.0.100 - 10.20.0.199
+    dhcp_relay_ip: 10.20.0.1
+    dhcp_dns_ip: 10.100.1.130
+
+  tasks:
+    - name: Verificar la IP de servicio y la interfaz de datos
+      ansible.builtin.assert:
+        that:
+          - dhcp_interface != 'ens3'
+          - dhcp_server_ip == (ansible_facts[dhcp_interface].ipv4.address | default(''))
+            or dhcp_server_ip in (ansible_facts[dhcp_interface].ipv4_secondaries | default([]) | map(attribute='address') | list)
+        fail_msg: "Configura primero {{ dhcp_server_ip }}/28 en {{ dhcp_interface }} de la VM DNS/DHCP."
+
+    - name: Consultar la ruta de respuesta al relay
+      ansible.builtin.command:
+        argv: [ip, -j, -4, route, get, "{{ dhcp_relay_ip }}", from, "{{ dhcp_server_ip }}"]
+      register: dhcp_route
+      changed_when: false
+
+    - name: Verificar que las respuestas al relay saldrán por datos
+      ansible.builtin.assert:
+        that:
+          - (dhcp_route.stdout | from_json | first).dev == dhcp_interface
+        fail_msg: >-
+          Añade la ruta persistente de Netplan para {{ dhcp_client_subnet }} en
+          {{ dhcp_interface }} vía el router del segmento G11 (propuesta 10.100.1.129).
+          Vuelve a ejecutar este playbook cuando la consulta de ruta use {{ dhcp_interface }}.
+
+    - name: Instalar el paquete DHCPv4 sin iniciar el servicio con la configuración de ejemplo
+      ansible.builtin.apt:
+        name: kea-dhcp4-server
+        state: present
+        policy_rc_d: 101
+
+    - name: Validar y guardar la configuración de Kea
+      ansible.builtin.copy:
+        dest: /etc/kea/kea-dhcp4.conf
+        owner: root
+        group: _kea
+        mode: '0640'
+        backup: true
+        validate: /usr/sbin/kea-dhcp4 -t %s
+        content: |
+          {
+            "Dhcp4": {
+              "interfaces-config": {
+                "interfaces": [ "{{ dhcp_interface }}/{{ dhcp_server_ip }}" ],
+                "dhcp-socket-type": "udp"
+              },
+              "lease-database": {
+                "type": "memfile",
+                "persist": true,
+                "name": "/var/lib/kea/kea-leases4.csv"
+              },
+              "valid-lifetime": 28800,
+              "subnet4": [
+                {
+                  "id": 200,
+                  "subnet": "{{ dhcp_client_subnet }}",
+                  "pools": [ { "pool": "{{ dhcp_pool }}" } ],
+                  "relay": { "ip-addresses": [ "{{ dhcp_relay_ip }}" ] },
+                  "option-data": [
+                    { "name": "routers", "data": "{{ dhcp_relay_ip }}" },
+                    { "name": "domain-name-servers", "data": "{{ dhcp_dns_ip }}" }
+                  ]
+                }
+              ]
+            }
+          }
+      notify: Reiniciar Kea
+
+    - name: Aplicar los cambios antes de verificar
+      ansible.builtin.meta: flush_handlers
+
+    - name: Habilitar el servidor después de reinicios de la VM
+      ansible.builtin.systemd_service:
+        name: kea-dhcp4-server
+        state: started
+        enabled: true
+
+    - name: Comprobar que Kea atiende en la dirección de datos y UDP 67
+      ansible.builtin.command:
+        argv: [ss, -H, -u, -l, -n, -p, sport, '=', ':67']
+      register: dhcp_sockets
+      changed_when: false
+      until: >-
+        dhcp_sockets.stdout_lines
+        | select('search', (dhcp_server_ip | regex_escape) ~ '(%[^ ]+)?:67\s')
+        | select('search', 'kea-dhcp4') | list | length > 0
+      retries: 5
+      delay: 2
+
+  handlers:
+    - name: Reiniciar Kea
+      ansible.builtin.systemd_service:
+        name: kea-dhcp4-server
+        state: restarted

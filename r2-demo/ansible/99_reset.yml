@@ -1,0 +1,34 @@
+# Devuelve el slice al estado del Lab 4: switches en modo NORMAL sin
+# controlador, hosts con 10.0.0.x, sin servicios de prueba y sin ONOS.
+# Uso: ansible-playbook 99_reset.yml
+- name: Switches a modo NORMAL
+  hosts: switches
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.shell: |
+        ovs-vsctl --if-exists del-controller {{ inventory_hostname }}
+        ovs-vsctl set-fail-mode {{ inventory_hostname }} standalone
+        ovs-ofctl -O OpenFlow13 del-flows {{ inventory_hostname }}
+        ovs-ofctl -O OpenFlow13 add-flow {{ inventory_hostname }} "actions=NORMAL"
+      changed_when: true
+
+- name: Hosts a 10.0.0.x
+  hosts: endpoints
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.shell: |
+        systemctl disable --now r2-svc 2>/dev/null; rm -f /etc/systemd/system/r2-svc.service
+        ip addr flush dev ens4
+        ip addr add 10.0.0.{{ inventory_hostname[1] }}/24 dev ens4
+      changed_when: true
+
+- name: Quitar ONOS
+  hosts: onos
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.command: docker rm -f onos
+      failed_when: false
+      changed_when: true

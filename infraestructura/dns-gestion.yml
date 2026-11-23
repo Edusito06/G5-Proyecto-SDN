@@ -1,0 +1,94 @@
+---
+- name: Identificar los DNS IPv4 de la interfaz externa del gateway y probar los repositorios
+  delegate_to: localhost
+  become: false
+  ansible.builtin.shell: |
+    set -eu
+    ip -o -4 addr show dev ens3 | grep -F ' 10.20.12.7/24 ' >/dev/null
+    ip -o -4 addr show dev ens4 | grep -F ' 192.168.0.1/24 ' >/dev/null
+    for host in pe.archive.ubuntu.com security.ubuntu.com; do
+      getent ahostsv4 "$host" >/dev/null || { echo "El gateway tampoco resuelve $host" >&2; exit 1; }
+    done
+    python3 - <<'PY'
+    import ipaddress, pathlib, subprocess
+    r = subprocess.run(['resolvectl','dns','ens3'], capture_output=True, text=True)
+    paths = ['/run/systemd/resolve/resolv.conf','/etc/resolv.conf']
+    candidates = r.stdout.split(':',1)[-1].split()
+    for path in paths:
+        f = pathlib.Path(path)
+        if f.is_file():
+            candidates.extend(line.split()[1] for line in f.read_text().splitlines()
+                              if line.startswith('nameserver ') and len(line.split()) >= 2)
+    dns = []
+    for value in candidates:
+        try:
+            ip = ipaddress.IPv4Address(value)
+        except ValueError:
+            continue
+        if not ip.is_loopback and not ip.is_unspecified and value not in dns:
+            dns.append(value)
+    if not dns:
+        raise SystemExit('El gateway no anuncia un DNS IPv4 de subida')
+    print(' '.join(dns))
+    PY
+  register: upstream_dns
+  changed_when: false
+
+- name: Verificar la identidad de ONOS-1 y la ruta de gestión antes de cambiar DNS
+  ansible.builtin.shell: |
+    set -eu
+    ip -o -4 addr show dev ens3 | grep -F ' 192.168.0.16/24 ' >/dev/null
+    systemctl is-active --quiet systemd-resolved
+    if [ -z "$(ip -4 route show default)" ]; then
+      ip route add default via 192.168.0.1 dev ens3 metric 1024
+      echo 'Ruta de gestión añadida'
+    fi
+    for ns in $DNS; do
+      ip -4 route get "$ns" | grep -E 'via 192\.168\.0\.1 dev ens3( |$)' || {
+        echo "Revisar ruta al DNS $ns desde ONOS-1" >&2; exit 1;
+      }
+    done
+  environment:
+    DNS: "{{ upstream_dns.stdout }}"
+  register: management_route
+  changed_when: "'Ruta de gestión añadida' in management_route.stdout"
+
+- name: Permitir DNS y descargas de ONOS-1 en la salida del gateway
+  delegate_to: localhost
+  become: true
+  ansible.builtin.shell: |
+    set -eu
+    [ "$(sysctl -n net.ipv4.ip_forward)" = 1 ] || { echo 'Revisa el reenvío IPv4 del gateway del slice'; exit 1; }
+    ensure() {
+      table=$1; shift
+      if ! iptables -w 5 -t "$table" -C "$@" 2>/dev/null; then
+        iptables -w 5 -t "$table" -A "$@"
+        echo 'Regla añadida'
+      fi
+    }
+    for ns in $DNS; do
+      ip route get "$ns" | grep -E 'dev ens3( |$)' >/dev/null
+      for proto in tcp udp; do
+        ensure filter FORWARD -i ens4 -o ens3 -s 192.168.0.16/32 -d "$ns" -p "$proto" --dport 53 -j ACCEPT
+        ensure nat POSTROUTING -o ens3 -s 192.168.0.16/32 -d "$ns" -p "$proto" --dport 53 -j MASQUERADE
+      done
+    done
+    ensure filter FORWARD -i ens4 -o ens3 -s 192.168.0.16/32 -p tcp -m multiport --dports 80,443 -j ACCEPT
+    ensure nat POSTROUTING -o ens3 -s 192.168.0.16/32 -p tcp -m multiport --dports 80,443 -j MASQUERADE
+    ensure filter FORWARD -i ens3 -o ens4 -d 192.168.0.16/32 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  environment:
+    DNS: "{{ upstream_dns.stdout }}"
+  register: gateway_rules
+  changed_when: "'Regla añadida' in gateway_rules.stdout"
+
+- name: Aplicar el DNS de subida al enlace de gestión y comprobar los dos nombres en ONOS-1
+  ansible.builtin.shell: |
+    set -eu
+    resolvectl dns ens3 $DNS
+    resolvectl domain ens3 '~.'
+    resolvectl flush-caches
+    for host in pe.archive.ubuntu.com security.ubuntu.com; do
+      getent ahostsv4 "$host" || { resolvectl status ens3; resolvectl query "$host"; exit 1; }
+    done
+  environment:
+    DNS: "{{ upstream_dns.stdout }}"

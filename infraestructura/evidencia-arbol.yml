@@ -1,0 +1,111 @@
+---
+- name: Capturar el estado de cada bridge sin modificarlo
+  hosts: ovs
+  gather_facts: false
+  become: true
+  vars:
+    tree_interfaces:
+      core-1: [ens6, ens7, ens8, ens9]
+      core-2: [ens6]
+      dc-dist: [ens4, ens5, ens6]
+      r-sw1: [ens4]
+      r-sw2: [ens4]
+      s-dist: [ens4]
+  tasks:
+    - name: Leer estado de la interfaz, puertos OpenFlow y conexiones TCP
+      ansible.builtin.command:
+        argv: "{{ ['python3', '-', inventory_hostname, bootstrap_ip] + tree_interfaces[inventory_hostname] }}"
+        stdin: "{{ lookup('ansible.builtin.file', 'files/evidencia_arbol.py') }}"
+      changed_when: false
+      register: observed_switch
+    - name: Guardar la muestra en memoria
+      ansible.builtin.set_fact:
+        evidence_switch: "{{ observed_switch.stdout | from_json }}"
+
+- name: Leer dispositivos y puertos en ONOS-1
+  hosts: onos-1
+  gather_facts: false
+  vars_prompt:
+    - name: evidence_rest_password
+      prompt: Contraseña REST de ONOS-1 para leer evidencia
+      private: true
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ onos_rest_user | default('onos') }}"
+      url_password: "{{ evidence_rest_password }}"
+      force_basic_auth: true
+      use_proxy: false
+      follow_redirects: none
+      headers: {Accept: application/json}
+  tasks:
+    - name: Obtener la disponibilidad de los dispositivos según ONOS
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8181/onos/v1/devices
+      register: evidence_devices
+      failed_when: false
+      no_log: true
+    - name: Consultar cada DPID esperado aunque falte en la lista
+      vars:
+        device_id: "{{ 'of:%016x' | format(hostvars[item].bootstrap_ip.split('.')[-1] | int) }}"
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8181/onos/v1/devices/{{ device_id }}/ports"
+      loop: "{{ groups.ovs }}"
+      register: evidence_ports
+      failed_when: false
+      no_log: true
+    - name: Conservar únicamente los datos devueltos por REST
+      ansible.builtin.set_fact:
+        reported_devices: "{{ evidence_devices.json.devices | default([]) }}"
+        http_devices: "{{ evidence_devices.status | default(-1) }}"
+        reported_ports: "{{ reported_ports | default({}) | combine({item.item: {'http': item.status | default(-1), 'ports': item.json.ports | default([])}}) }}"
+      loop: "{{ evidence_ports.results }}"
+      no_log: true
+
+- name: Escribir evidencia fechada en el gateway que ejecuta Ansible
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    onos: "{{ hostvars['onos-1'] }}"
+  tasks:
+    - name: Comparar las observaciones del switch con el dispositivo informado por ONOS
+      vars:
+        dpid: "{{ 'of:%016x' | format(hostvars[item].bootstrap_ip.split('.')[-1] | int) }}"
+        sample: "{{ hostvars[item].evidence_switch | default({'issues': ['Sin muestra del switch']}) }}"
+        available: "{{ onos.reported_devices | default([]) | selectattr('available') | map(attribute='id') | list }}"
+        ports: "{{ (onos.reported_ports | default({})).get(item, {'http': -1, 'ports': []}) }}"
+        rest_differences: >-
+          {%- set diff = [] -%}
+          {%- if ports.http | int == 200 -%}
+          {%- for name, local in (sample.ports | default({})).items() -%}
+          {%- set matches = ports.ports | selectattr('port', 'defined') | selectattr('port', 'in', [local.ofport | default('-1') | int, local.ofport | default('-1') | string]) | list -%}
+          {%- if matches | length != 1 or matches[0].isEnabled is not defined or (matches[0].isEnabled | bool) != local.tree -%}
+          {%- set _ = diff.append(name ~ ': ONOS no confirma el estado esperado del puerto') -%}
+          {%- endif -%}{%- endfor -%}{%- endif -%}
+          {{ diff }}
+        issues: "{{ sample.issues + rest_differences + (['ONOS no informa el DPID disponible'] if dpid not in available else []) + (['Consulta de puertos REST sin respuesta válida'] if ports.http | int != 200 else []) }}"
+      ansible.builtin.set_fact:
+        summary: "{{ summary | default({}) | combine({item: {'expected_dpid': dpid, 'issues': issues, 'ovs': sample, 'onos_available': (dpid in available), 'onos_ports': ports}}) }}"
+      loop: "{{ groups.ovs }}"
+    - name: Crear la carpeta de evidencia
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/evidencia"
+        state: directory
+        mode: "0700"
+    - name: Asignar nombre único al informe
+      ansible.builtin.set_fact:
+        report_path: "{{ playbook_dir }}/evidencia/arbol-{{ now(utc=true, fmt='%Y%m%dT%H%M%S%fZ') }}.json"
+    - name: Guardar también los resultados parciales
+      ansible.builtin.copy:
+        dest: "{{ report_path }}"
+        mode: "0600"
+        content: "{{ {'http_devices': onos.http_devices | default(-1), 'switches': summary} | to_nice_json }}"
+    - name: Mostrar ruta e incidencias por switch
+      ansible.builtin.debug:
+        msg: "{{ report_path }} | {{ item.key }} | {{ item.value.issues | default([], true) }}"
+      loop: "{{ summary | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+    - name: Exigir árbol estricto y seis sesiones disponibles en ambos extremos
+      ansible.builtin.assert:
+        that: summary.values() | map(attribute='issues') | flatten | length == 0
+        fail_msg: "La evidencia contiene diferencias; revisar {{ report_path }}."

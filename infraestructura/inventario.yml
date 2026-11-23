@@ -1,0 +1,23 @@
+all:
+  vars:
+    ansible_user: ubuntu
+    ansible_python_interpreter: /usr/bin/python3
+  children:
+    onos:
+      hosts:
+        onos-1:
+          ansible_host: 192.168.0.16
+    dhcp:
+      hosts:
+        dns-dhcp:
+          ansible_host: 192.168.0.20
+    ovs:
+      vars:
+        bootstrap_ports: "{{ (vnrt_tree_ports | default({})).get(inventory_hostname, {}) }}"
+      hosts:
+        core-1: {ansible_host: 192.168.0.10, bootstrap_ip: 10.100.0.3}
+        core-2: {ansible_host: 192.168.0.11, bootstrap_ip: 10.100.0.4}
+        dc-dist: {ansible_host: 192.168.0.12, bootstrap_ip: 10.100.0.5}
+        r-sw1: {ansible_host: 192.168.0.13, bootstrap_ip: 10.100.0.6}
+        r-sw2: {ansible_host: 192.168.0.14, bootstrap_ip: 10.100.0.7}
+        s-dist: {ansible_host: 192.168.0.15, bootstrap_ip: 10.100.0.8}

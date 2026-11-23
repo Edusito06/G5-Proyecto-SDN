@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.onosproject</groupId>
+        <artifactId>onos-dependencies</artifactId>
+        <version>2.7.0</version>
+    </parent>
+    <groupId>org.g05</groupId>
+    <artifactId>g05-inband</artifactId>
+    <version>1.0.0</version>
+    <packaging>bundle</packaging>
+    <description>Bootstrap progresivo de switches por el canal OpenFlow del campus</description>
+    <properties>
+        <onos.app.name>org.g05.inband</onos.app.name>
+        <onos.app.title>G05 in-band bootstrap</onos.app.title>
+        <onos.app.origin>G05</onos.app.origin>
+        <onos.app.category>Network</onos.app.category>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.onosproject</groupId><artifactId>onos-api</artifactId>
+            <version>2.7.0</version><scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.onosproject</groupId><artifactId>onlab-misc</artifactId>
+            <version>2.7.0</version><scope>provided</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin><groupId>org.onosproject</groupId><artifactId>onos-maven-plugin</artifactId></plugin>
+        </plugins>
+    </build>
+</project>

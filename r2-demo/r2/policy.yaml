@@ -1,0 +1,29 @@
+# Política R2 declarativa (G05, LLSD §5.1 y §2.2). Se versiona y se valida con
+# `r2ctl validate`; un cambio de política es un cambio de este archivo.
+bloque_critico: 10.100.0.0/25
+bloques_privados: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+
+# ip: dirección del servidor de demostración (alias en h3).
+recursos:
+  G01: {nombre: onos,          prefijo: 10.100.0.0/28,   ip: 10.100.0.2,   nivel: critico}
+  G02: {nombre: ldap,          prefijo: 10.100.0.16/28,  ip: 10.100.0.18,  nivel: critico}
+  G03: {nombre: radius,        prefijo: 10.100.0.32/28,  ip: 10.100.0.34,  nivel: critico}
+  G04: {nombre: matricula,     prefijo: 10.100.0.48/28,  ip: 10.100.0.50,  nivel: critico}
+  G05: {nombre: planillas,     prefijo: 10.100.0.64/28,  ip: 10.100.0.66,  nivel: critico}
+  G06: {nombre: notas,         prefijo: 10.100.0.128/28, ip: 10.100.0.130, nivel: intermedio, servicios: [tcp/443]}
+  G07: {nombre: investigacion, prefijo: 10.100.0.144/28, ip: 10.100.0.146, nivel: intermedio, servicios: [tcp/443, tcp/22]}
+  G08: {nombre: laboratorio,   prefijo: 10.100.0.160/28, ip: 10.100.0.162, nivel: intermedio, servicios: [tcp/22, tcp/443]}
+  G09: {nombre: admin-unidad,  prefijo: 10.100.0.176/28, ip: 10.100.0.178, nivel: intermedio, servicios: [tcp/443]}
+  G10: {nombre: portal,        prefijo: 10.100.1.0/25,   ip: 10.100.1.10,  nivel: general}
+  G11: {nombre: dns,           prefijo: 10.100.1.128/28, ip: 10.100.1.130, nivel: general, servicios: [udp/53, tcp/53]}
+  G12: {nombre: mesa-ayuda,    prefijo: 10.100.1.144/28, ip: 10.100.1.150, nivel: general, servicios: [tcp/80, tcp/443]}
+
+# Roles (VLAN = rol x 100). Un rol no listado en `permite` no ve ese recurso.
+roles:
+  5: {nombre: admin,          permite: todo, internet: true}
+  4: {nombre: administrativo, permite: [G09, G10, G11, G12], internet: true}
+  3: {nombre: docente,        permite: [G06, G07, G08, G10, G11, G12], internet: true}
+  2: {nombre: alumno,         permite: [G10, G11, G12], internet: true}
+  1: {nombre: invitado,       permite: [G11, G12], internet: true}
+  9: {nombre: cuarentena,     permite: [G11, G12], internet: false}
+defecto: denegar

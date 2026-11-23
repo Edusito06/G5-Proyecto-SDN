@@ -1,0 +1,78 @@
+#!/usr/bin/python3
+"""Restore only the switch-to-controller paths of the provisional VNRT tree."""
+from collections import deque
+from pathlib import Path
+import subprocess
+import tempfile
+
+NODE = {{ inventory_hostname | to_json }}
+TREE = {{ bootstrap_tree | to_json }}
+PORT_NAMES = {{ bootstrap_ports | to_json }}
+ADDRESSES = {
+{% for switch in groups['ovs'] %}
+    {{ switch | to_json }}: {{ hostvars[switch].bootstrap_ip | to_json }},
+{% endfor %}
+}
+CONTROLLER = "10.100.0.2"
+COOKIE = "0x4730350000006653"
+SELECTOR = f"table=0,cookie={COOKIE}/0xffffffffffffffff"
+OFCTL = ["ovs-ofctl", "-O", "OpenFlow13", "--no-names"]
+
+
+def path_to_onos(origin):
+    pending = deque([[origin]])
+    while pending:
+        path = pending.popleft()
+        if path[-1] == "onos-1":
+            return path
+        for neighbor in TREE[path[-1]]:
+            if neighbor not in path:
+                pending.append(path + [neighbor])
+    raise ValueError(f"Sin camino hacia ONOS desde {origin}")
+
+
+def ipv4_control_rules(ports):
+    rules = []
+    for switch, address in ADDRESSES.items():
+        path = path_to_onos(switch)
+        if NODE not in path:
+            continue
+        i = path.index(NODE)
+        down = ports[path[i - 1]] if i else "LOCAL"
+        up = ports[path[i + 1]]
+        directions = [(address, CONTROLLER, down, up, "tp_dst"),
+                      (CONTROLLER, address, up, down, "tp_src")]
+        for src, dst, incoming, outgoing, tcp_port in directions:
+            base = f"cookie={COOKIE},table=0,priority=65000,in_port={incoming},dl_vlan=0xffff"
+            action = f" actions=output:{outgoing}"
+            rules.append(f"{base},arp,arp_spa={src},arp_tpa={dst}{action}")
+            rules.append(f"{base},tcp,nw_src={src},nw_dst={dst},{tcp_port}=6653{action}")
+    return rules
+
+
+def restore():
+    ports = {}
+    for neighbor, interface in PORT_NAMES.items():
+        number = int(subprocess.check_output(["ovs-vsctl", "get", "Interface", interface, "ofport"]))
+        if number < 1:
+            raise ValueError(f"{interface} sin ofport operativo")
+        ports[neighbor] = number
+    rules = ipv4_control_rules(ports)
+    dump = subprocess.check_output([*OFCTL, "dump-flows", "br0", SELECTOR], text=True)
+    with tempfile.TemporaryDirectory() as directory:
+        current = Path(directory, "current")
+        wanted = Path(directory, "wanted")
+        current.write_text("".join(line.strip() + "\n" for line in dump.splitlines() if "cookie=" in line))
+        wanted.write_text("\n".join(rules) + "\n")
+        diff = subprocess.run([*OFCTL, "diff-flows", current, wanted], stdout=subprocess.DEVNULL)
+        if diff.returncode == 0:
+            return
+        if diff.returncode != 2:
+            diff.check_returncode()
+    updates = [f"delete {SELECTOR}", *rules]
+    subprocess.run([*OFCTL, "--bundle", "add-flows", "br0", "-"],
+                   input="\n".join(updates) + "\n", text=True, check=True)
+
+
+if __name__ == "__main__":
+    restore()

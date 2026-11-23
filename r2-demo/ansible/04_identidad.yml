@@ -1,0 +1,443 @@
+# Paso 4 (R1): OpenLDAP con ppolicy + FreeRADIUS (EAP-TTLS/PAP sobre LDAP) en
+# h3 (servidor RADIUS G03), y la app AAA de ONOS apuntando a FreeRADIUS.
+# FreeRADIUS no puede ir en el controller: la app AAA abre un socket UDP en *:1812.
+#
+# EAP-TTLS/PAP en lugar de PEAP/MSCHAPv2: ppolicy solo cuenta intentos fallidos
+# cuando FreeRADIUS hace `bind` contra LDAP; con MSCHAPv2 no hay bind y el
+# bloqueo a los 5 intentos del LLSD §4.1 no se activaría.
+#
+# Uso: ansible-playbook 04_identidad.yml
+- name: Identidad (OpenLDAP y FreeRADIUS) en h3, el servidor G03
+  hosts: identidad
+  become: true
+  gather_facts: false
+  vars:
+    # Las credenciales se generan una vez y se reutilizan (idempotente).
+    cred_dir: "{{ playbook_dir }}/credentials"
+    ldap_admin_pw: "{{ lookup('ansible.builtin.password', cred_dir + '/ldap_admin length=20 chars=ascii_letters,digits') }}"
+    ldap_radius_pw: "{{ lookup('ansible.builtin.password', cred_dir + '/ldap_radius length=20 chars=ascii_letters,digits') }}"
+    radius_secret: "{{ lookup('ansible.builtin.password', cred_dir + '/radius_secret length=24 chars=ascii_letters,digits') }}"
+    rest_identity: true           # FreeRADIUS entrega usuario y rol a identity
+  tasks:
+    - name: Preconfigurar slapd (dominio y contraseña de administrador)
+      ansible.builtin.debconf:
+        name: slapd
+        question: "{{ item.q }}"
+        vtype: "{{ item.t }}"
+        value: "{{ item.v }}"
+      loop:
+        - {q: slapd/domain, t: string, v: "{{ ldap_domain }}"}
+        - {q: shared/organization, t: string, v: Campus}
+        - {q: slapd/password1, t: password, v: "{{ ldap_admin_pw }}"}
+        - {q: slapd/password2, t: password, v: "{{ ldap_admin_pw }}"}
+        - {q: slapd/no_configuration, t: boolean, v: "false"}
+      no_log: true
+
+    - name: Instalar OpenLDAP y FreeRADIUS
+      ansible.builtin.apt:
+        name: [slapd, ldap-utils, freeradius, freeradius-ldap, freeradius-rest, python3-passlib]
+        state: present
+      environment: {DEBIAN_FRONTEND: noninteractive}
+
+    # ------------------------------------------------------------- LDAP
+    - name: Cargar el esquema y el módulo ppolicy
+      ansible.builtin.shell: |
+        ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/ldap/schema/ppolicy.ldif 2>&1 || true
+        ldapmodify -Y EXTERNAL -H ldapi:/// <<'EOF' 2>&1 || true
+        dn: cn=module{0},cn=config
+        changetype: modify
+        add: olcModuleLoad
+        olcModuleLoad: ppolicy
+        EOF
+        ldapadd -Y EXTERNAL -H ldapi:/// <<'EOF' 2>&1 || true
+        dn: olcOverlay=ppolicy,olcDatabase={1}mdb,cn=config
+        objectClass: olcOverlayConfig
+        objectClass: olcPPolicyConfig
+        olcOverlay: ppolicy
+        olcPPolicyDefault: cn=default,ou=policies,{{ ldap_base }}
+        olcPPolicyUseLockout: FALSE
+        olcPPolicyHashCleartext: FALSE
+        EOF
+      args: {executable: /bin/bash}
+      register: ppol
+      changed_when: "'adding new entry' in ppol.stdout or 'modifying entry' in ppol.stdout"
+
+    - name: Archivo temporal con la contraseña de cn=admin (se borra al terminar)
+      ansible.builtin.copy:
+        dest: /root/.ldappw
+        content: "{{ ldap_admin_pw }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Estructura base, política de contraseñas y cuenta de FreeRADIUS
+      ansible.builtin.shell: |
+        ldapadd -c -x -H ldap://localhost -D cn=admin,{{ ldap_base }} -y /root/.ldappw <<'EOF' 2>&1
+        dn: ou=people,{{ ldap_base }}
+        objectClass: organizationalUnit
+        ou: people
+
+        dn: ou=groups,{{ ldap_base }}
+        objectClass: organizationalUnit
+        ou: groups
+
+        dn: ou=policies,{{ ldap_base }}
+        objectClass: organizationalUnit
+        ou: policies
+
+        dn: cn=default,ou=policies,{{ ldap_base }}
+        objectClass: device
+        objectClass: pwdPolicy
+        cn: default
+        pwdAttribute: userPassword
+        pwdMaxFailure: 5
+        pwdFailureCountInterval: 900
+        pwdLockout: TRUE
+        pwdLockoutDuration: 900
+        pwdAllowUserChange: FALSE
+        EOF
+      args: {executable: /bin/bash}
+      register: base
+      changed_when: "'Already exists' not in base.stdout"
+      failed_when: base.rc not in [0, 68]
+
+    - name: Cuenta de lectura de FreeRADIUS (contraseña con hash SSHA)
+      ansible.builtin.shell: |
+        H=$(slappasswd -s '{{ ldap_radius_pw }}')
+        ldapadd -c -x -H ldap://localhost -D cn=admin,{{ ldap_base }} -y /root/.ldappw <<EOF 2>&1
+        dn: cn=radius,{{ ldap_base }}
+        objectClass: simpleSecurityObject
+        objectClass: organizationalRole
+        cn: radius
+        userPassword: $H
+        EOF
+      args: {executable: /bin/bash}
+      no_log: true
+      register: rad
+      changed_when: "'Already exists' not in rad.stdout"
+      failed_when: rad.rc not in [0, 68]
+
+    - name: Usuarios de prueba y grupos de red
+      ansible.builtin.shell: |
+        PW='{{ lookup("ansible.builtin.password", cred_dir + "/" + item.key + " length=14 chars=ascii_letters,digits") }}'
+        H=$(slappasswd -s "$PW")
+        ldapadd -c -x -H ldap://localhost -D cn=admin,{{ ldap_base }} -y /root/.ldappw <<EOF 2>&1
+        dn: uid={{ item.key }},ou=people,{{ ldap_base }}
+        objectClass: inetOrgPerson
+        uid: {{ item.key }}
+        cn: {{ item.key }}
+        sn: {{ item.key }}
+        mail: {{ item.key }}@{{ ldap_domain }}
+        userPassword: $H
+        EOF
+      args: {executable: /bin/bash}
+      loop: "{{ usuarios_ldap | dict2items }}"
+      no_log: true
+      register: usr
+      changed_when: "'Already exists' not in usr.stdout"
+      failed_when: usr.rc not in [0, 68]
+
+    - name: Grupos de red (groupOfNames)
+      ansible.builtin.shell: |
+        ldapadd -c -x -H ldap://localhost -D cn=admin,{{ ldap_base }} -y /root/.ldappw <<'EOF' 2>&1
+        dn: cn={{ item }},ou=groups,{{ ldap_base }}
+        objectClass: groupOfNames
+        cn: {{ item }}
+        {% for u, g in usuarios_ldap.items() if g == item %}
+        member: uid={{ u }},ou=people,{{ ldap_base }}
+        {% else %}
+        member: cn=radius,{{ ldap_base }}
+        {% endfor %}
+        EOF
+      args: {executable: /bin/bash}
+      loop: [net-admin, net-administrativo, net-docente, net-alumno]
+      register: grp
+      changed_when: "'Already exists' not in grp.stdout"
+      failed_when: grp.rc not in [0, 68]
+
+    - name: Borrar el archivo temporal de contraseña
+      ansible.builtin.file: {path: /root/.ldappw, state: absent}
+
+    # ------------------------------------------------------- FreeRADIUS
+    - name: Cliente RADIUS (la app AAA de ONOS, desde el controller)
+      ansible.builtin.copy:
+        dest: /etc/freeradius/3.0/clients.conf
+        owner: freerad
+        group: freerad
+        mode: "0640"
+        content: |
+          client onos {
+              ipaddr = {{ onos_nas_ip }}
+              secret = {{ radius_secret }}
+              shortname = onos
+              require_message_authenticator = no
+          }
+      no_log: true
+
+    - name: Módulo ldap
+      ansible.builtin.copy:
+        dest: /etc/freeradius/3.0/mods-available/ldap
+        owner: freerad
+        group: freerad
+        mode: "0640"
+        content: |
+          ldap {
+              server = 'localhost'
+              port = 389
+              identity = 'cn=radius,{{ ldap_base }}'
+              password = '{{ ldap_radius_pw }}'
+              base_dn = '{{ ldap_base }}'
+              update {
+                  control:Tmp-String-0 := 'pwdAccountLockedTime'
+              }
+              user {
+                  base_dn = "ou=people,${..base_dn}"
+                  {% raw %}filter = "(uid=%{%{Stripped-User-Name}:-%{User-Name}})"{% endraw %}
+              }
+              group {
+                  base_dn = "ou=groups,${..base_dn}"
+                  filter = '(objectClass=groupOfNames)'
+                  name_attribute = cn
+                  membership_filter = "(&(objectClass=groupOfNames)(member=%{control:Ldap-UserDn}))"
+                  cacheable_name = 'no'
+                  cacheable_dn = 'no'
+              }
+              options {
+                  chase_referrals = no
+                  rebind = no
+                  res_timeout = 10
+                  srv_timelimit = 3
+                  net_timeout = 1
+                  idle = 60
+                  probes = 3
+                  interval = 3
+                  ldap_debug = 0x0000
+              }
+              pool {
+                  start = 1
+                  min = 1
+                  max = 8
+                  spare = 2
+                  uses = 0
+                  retry_delay = 30
+                  lifetime = 0
+                  idle_timeout = 60
+              }
+          }
+      no_log: true
+
+    - name: Habilitar el módulo ldap
+      ansible.builtin.file:
+        src: /etc/freeradius/3.0/mods-available/ldap
+        dest: /etc/freeradius/3.0/mods-enabled/ldap
+        state: link
+
+    # EAP-TLS: la app AAA de ONOS solo maneja EAP-MD5 y EAP-TLS (V3 en VNRT).
+    - name: PKI de R1 (CA, certificado del servidor y uno por usuario)
+      ansible.builtin.shell: |
+        set -e
+        D=/etc/freeradius/3.0/certs-r1
+        mkdir -p $D/clientes && cd $D
+        [ -f ca.key ] || openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -subj "/C=PE/O=Campus/CN=Campus CA" -keyout ca.key -out ca.pem 2>/dev/null
+        if [ ! -f server.key ]; then
+          openssl req -newkey rsa:2048 -nodes -subj "/C=PE/O=Campus/CN=radius.campus.lab" \
+              -keyout server.key -out server.csr 2>/dev/null
+          printf "basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:radius.campus.lab\n" > srv.ext
+          openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 825 \
+              -extfile srv.ext -out server.pem 2>/dev/null
+        fi
+        for u in {{ usuarios_ldap.keys() | join(' ') }}; do
+          [ -f clientes/$u.key ] && continue
+          openssl req -newkey rsa:2048 -nodes -subj "/C=PE/O=Campus/CN=$u" \
+              -keyout clientes/$u.key -out clientes/$u.csr 2>/dev/null
+          printf "basicConstraints=CA:FALSE\nextendedKeyUsage=clientAuth\n" > cli.ext
+          openssl x509 -req -in clientes/$u.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 825 \
+              -extfile cli.ext -out clientes/$u.pem 2>/dev/null
+        done
+        chown -R freerad:freerad $D
+        chmod 640 server.key ca.key
+        chmod 644 ca.pem server.pem clientes/*.pem
+        chmod 600 clientes/*.key
+      args: {executable: /bin/bash}
+      register: pki
+      changed_when: "'creado' in pki.stdout or true"
+
+    - name: Módulo EAP (solo TLS)
+      ansible.builtin.copy:
+        dest: /etc/freeradius/3.0/mods-available/eap
+        owner: freerad
+        group: freerad
+        mode: "0640"
+        content: |
+          eap {
+              default_eap_type = tls
+              timer_expire = 60
+              ignore_unknown_eap_types = no
+              cisco_accounting_username_bug = no
+              max_sessions = ${max_requests}
+              tls-config tls-common {
+                  private_key_file = /etc/freeradius/3.0/certs-r1/server.key
+                  certificate_file = /etc/freeradius/3.0/certs-r1/server.pem
+                  ca_file = /etc/freeradius/3.0/certs-r1/ca.pem
+                  cipher_list = "DEFAULT"
+                  tls_min_version = "1.2"
+                  tls_max_version = "1.2"
+                  # El CN del certificado debe ser la identidad EAP (el uid de LDAP).
+                  check_cert_cn = "%{User-Name}"
+              }
+              tls {
+                  tls = tls-common
+              }
+          }
+
+    - name: Sitio de autenticación (EAP-TLS, rol por grupo de LDAP)
+      ansible.builtin.copy:
+        dest: /etc/freeradius/3.0/sites-available/default
+        owner: freerad
+        group: freerad
+        mode: "0640"
+        content: |
+          server default {
+              listen {
+                  type = auth
+                  ipaddr = *
+                  port = 1812
+              }
+              authorize {
+                  filter_username
+                  preprocess
+                  # El usuario debe existir en LDAP y no estar bloqueado por ppolicy.
+                  ldap
+                  if (notfound) {
+                      reject
+                  }
+                  if (&control:Tmp-String-0) {
+                      reject
+                  }
+                  eap {
+                      ok = return
+                  }
+              }
+              authenticate {
+                  eap
+              }
+              post-auth {
+                  # Precedencia de roles (LLSD §4.2): gana el de mayor privilegio.
+                  if (&LDAP-Group == "net-admin") {
+                      update reply { &Tunnel-Private-Group-Id := "500" }
+                  }
+                  elsif (&LDAP-Group == "net-administrativo") {
+                      update reply { &Tunnel-Private-Group-Id := "400" }
+                  }
+                  elsif (&LDAP-Group == "net-docente") {
+                      update reply { &Tunnel-Private-Group-Id := "300" }
+                  }
+                  elsif (&LDAP-Group == "net-alumno") {
+                      update reply { &Tunnel-Private-Group-Id := "200" }
+                  }
+                  else {
+                      reject                      # usuario válido sin grupo de red
+                  }
+                  update reply {
+                      &Tunnel-Type := VLAN
+                      &Tunnel-Medium-Type := IEEE-802
+                      &Session-Timeout := 3600
+                      &Termination-Action := RADIUS-Request
+                  }
+                  {% if rest_identity %}
+                  rest
+                  {% endif %}
+
+                  Post-Auth-Type REJECT {
+                      attr_filter.access_reject
+                  }
+              }
+          }
+
+    - name: Módulo rest (entrega usuario y rol al servicio identity)
+      ansible.builtin.copy:
+        dest: /etc/freeradius/3.0/mods-available/rest
+        owner: freerad
+        group: freerad
+        mode: "0640"
+        content: |
+          {% raw %}rest {
+              tls {
+              }
+              connect_uri = "http://192.168.0.10:5001"
+              connect_timeout = 3.0
+              post-auth {
+                  uri = "${..connect_uri}/identity/sessions"
+                  method = 'post'
+                  body = 'json'
+                  data = '{ "usuario": "%{User-Name}", "vlan": "%{reply:Tunnel-Private-Group-Id}" }'
+                  tls = ${..tls}
+              }
+              pool {
+                  # Conexión bajo demanda: FreeRADIUS debe arrancar aunque identity no esté arriba.
+                  start = 0
+                  min = 0
+                  max = 8
+                  spare = 0
+                  uses = 0
+                  retry_delay = 5
+                  lifetime = 0
+                  idle_timeout = 60
+              }
+          }{% endraw %}
+      when: rest_identity
+
+    - name: Habilitar el módulo rest
+      ansible.builtin.file:
+        src: /etc/freeradius/3.0/mods-available/rest
+        dest: /etc/freeradius/3.0/mods-enabled/rest
+        state: link
+      when: rest_identity
+
+    - name: Quitar el sitio inner-tunnel (ya no se usa con EAP-TLS)
+      ansible.builtin.file: {path: /etc/freeradius/3.0/sites-enabled/inner-tunnel, state: absent}
+
+    - name: Validar la configuración de FreeRADIUS
+      ansible.builtin.command: freeradius -C
+      register: frc
+      changed_when: false
+      failed_when: frc.rc != 0
+
+    - name: Reiniciar FreeRADIUS
+      ansible.builtin.systemd: {name: freeradius, state: restarted, enabled: true}
+
+- name: App AAA de ONOS apuntando a FreeRADIUS en h3
+  hosts: onos
+  become: true
+  gather_facts: false
+  vars:
+    cred_dir: "{{ playbook_dir }}/credentials"
+    radius_secret: "{{ lookup('ansible.builtin.password', cred_dir + '/radius_secret length=24 chars=ascii_letters,digits') }}"
+    radius_host: 192.168.0.23
+  tasks:
+    - name: Configuración de AAA en un archivo temporal (0600)
+      ansible.builtin.copy:
+        dest: /tmp/aaa-netcfg.json
+        owner: "{{ ansible_user }}"
+        mode: "0600"
+        content: >-
+          {{ {'apps': {'org.opencord.aaa': {'AAA': {
+              'radiusConnectionType': 'socket',
+              'radiusHost': radius_host, 'radiusIp': radius_host,
+              'radiusServerPort': '1812', 'radiusSecret': radius_secret,
+              'nasIp': onos_nas_ip, 'nasMac': 'fa:16:3e:59:41:64',
+              'sessionCleanupTimer': '600'}}}} | to_json }}
+      no_log: true
+
+    - name: Enviar la configuración a ONOS (REST, usa ~/.netrc)
+      ansible.builtin.shell: >-
+        curl -sn -X POST -H 'Content-Type: application/json'
+        -d @/tmp/aaa-netcfg.json -w '%{http_code}'
+        http://127.0.0.1:8181/onos/v1/network/configuration
+      register: aaa_cfg
+      changed_when: true
+      failed_when: "'200' not in aaa_cfg.stdout"
+      become: false
+
+    - name: Borrar el archivo temporal
+      ansible.builtin.file: {path: /tmp/aaa-netcfg.json, state: absent}

@@ -1,0 +1,89 @@
+---
+# Redundancia del canal de control in-band (G05): BFD + grupos Fast Failover.
+# Uso desde la carpeta del proyecto en el gateway:
+#   ansible-playbook -i inventario.yml redundancia.yml -k -K
+- name: Permitir en ONOS los grupos instalados fuera de la controladora
+  hosts: onos-1
+  gather_facts: false
+  vars_prompt:
+    - name: onos_rest_password
+      prompt: Contraseña REST de ONOS-1
+      private: true
+  tasks:
+    - name: Activar allowExtraneousGroups (equivalente a allowExtraneousRules para grupos)
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8181/onos/v1/configuration/org.onosproject.store.group.impl.DistributedGroupStore
+        method: POST
+        body_format: json
+        body: {allowExtraneousGroups: "true"}
+        url_username: "{{ onos_rest_user | default('onos') }}"
+        url_password: "{{ onos_rest_password }}"
+        force_basic_auth: true
+        status_code: [200, 204]
+      no_log: true
+
+- name: Instalar BFD, grupos Fast Failover y reglas de respaldo en los switches
+  hosts: ovs
+  become: true
+  gather_facts: false
+  serial: 1            # un switch a la vez; el camino primario coincide con el árbol, así que el orden no corta el control
+  tasks:
+    - name: Copiar el módulo
+      ansible.builtin.copy:
+        src: files/g05-redundancia.py
+        dest: /usr/local/sbin/g05-redundancia
+        mode: "0755"
+    - name: Servicio que recupera puertos y BFD al arrancar
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/g05-redundancia.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Respaldo del canal de control in-band (BFD + Fast Failover)
+          After=openvswitch-switch.service g05-paper-local.service
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/g05-redundancia apply
+          [Install]
+          WantedBy=multi-user.target
+    - name: Servicio de arranque para puertos y BFD
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/g05-redundancia-ports.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Enlaces entre switches activos con BFD
+          After=openvswitch-switch.service
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/g05-redundancia ports
+          [Install]
+          WantedBy=multi-user.target
+    - name: Comprobación periódica de grupos y reglas (solo reinstala si hay diferencias)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/g05-redundancia.timer
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Restaurar el respaldo del canal de control
+          [Timer]
+          OnBootSec=20s
+          OnUnitInactiveSec=30s
+          [Install]
+          WantedBy=timers.target
+    - name: Habilitar servicios
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+        name: "{{ item }}"
+        enabled: true
+      loop: [g05-redundancia-ports.service, g05-redundancia.timer]
+    - name: Activar puertos y BFD
+      ansible.builtin.command: /usr/local/sbin/g05-redundancia ports
+      changed_when: false
+    - name: Instalar grupos y reglas
+      ansible.builtin.command: /usr/local/sbin/g05-redundancia apply
+      changed_when: false
+    - name: Arrancar la comprobación periódica
+      ansible.builtin.systemd_service:
+        name: g05-redundancia.timer
+        state: started
