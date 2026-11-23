@@ -720,6 +720,9 @@ def rol_of(topo, h):
     return b['rol'] if b and b.get('estado') in ('VINCULADO', 'CUARENTENA') else None
 
 
+VERIFY_LOG = []              # cada prueba de verify (R2_VERIFY_JSON lo exporta)
+
+
 def run_verify(pol, topo, hosts):
     tg = targets(pol, topo)
     tot = Counter()
@@ -729,10 +732,14 @@ def run_verify(pol, topo, hosts):
         if rol is None:
             print(f'  {h}: sin sesión vinculada, se omite')
             continue
+        t0 = time.time()
         res = probe(topo, h, tg)
         for g, name, ip, proto, port in tg:
             exp = allowed(pol, rol, ip, proto, port)
             got = res.get((ip, proto, port))
+            VERIFY_LOG.append({'host': h, 'rol': rol, 'recurso': g, 'nombre': name, 'ip': ip,
+                               'proto': proto, 'puerto': port, 'esperado': exp, 'obtenido': got,
+                               't0': t0, 't1': time.time()})
             tot['pruebas'] += 1
             tot['no_autorizadas'] += (not exp)
             if got is None:
@@ -874,6 +881,9 @@ def cmd_verify(pol, topo, roles_all):
               f'({100 * tot["bloqueadas_ok"] / tot["no_autorizadas"]:.1f} %)')
     for e in err:
         print('  DISCREPANCIA:', *e)
+    if os.environ.get('R2_VERIFY_JSON'):
+        with open(os.environ['R2_VERIFY_JSON'], 'w') as fh:
+            json.dump(VERIFY_LOG, fh)
     return not err
 
 
@@ -886,15 +896,80 @@ def cmd_apply_quiet(pol, topo):
         sys.stdout = so
 
 
+# ------------------------------------------------------------ trazabilidad (IDS)
+SID_R2 = 2000000
+
+
+def subred_rol(rol):
+    return f'10.{int(rol) * 10}.0.0/24'
+
+
+def ids_reglas(pol):
+    """Firmas de Suricata para la trazabilidad de R2, generadas desde la política.
+
+    El switch descarta el intento; el IDS lo ve en el espejo de R-SW1 y lo reporta.
+    Por rol: (a) recursos no permitidos, (b) puertos no ofrecidos de los recursos que
+    sí tiene, (c) infraestructura (gestión) y subredes de otros roles. identity las
+    reconoce por el sid (2000000-2999999): las registra como INTENTO_DENEGADO, no bloquea.
+    Una alerta por par origen-destino cada 60 s (los contadores exactos son del switch)."""
+    lim = 'threshold: type limit, track by_both, count 1, seconds 60;'
+    out = ['# Generado por `r2ctl ids-reglas` desde policy.yaml: no editar a mano.',
+           '# Trazabilidad de R2 (G05): intentos de acceso que la política deniega.']
+    for rol, r in sorted(pol['roles'].items()):
+        gw = subred_rol(rol).replace('.0/24', '.1')
+        sub, n = f'[{subred_rol(rol)},!{gw}]', r['nombre']     # el router del rol no es un usuario
+        sid = SID_R2 + int(rol) * 1000
+        perm = set(pol['recursos']) if r['permite'] == 'todo' else set(r['permite'])
+
+        def regla(proto, dst, puertos, extra, msg):
+            nonlocal sid
+            sid += 1
+            out.append(f'alert {proto} {sub} any -> {dst} {puertos} (msg:"G05 R2 intento denegado: '
+                       f'{msg}"; {extra}{lim} classtype:policy-violation; '
+                       f'metadata:g05 r2, rol {n}; sid:{sid}; rev:1;)')
+        out.append(f'# rol {rol} {n} ({sub})')
+        for g, rec in sorted(pol['recursos'].items()):
+            if g not in perm:
+                regla('ip', rec['prefijo'], 'any', '', f'{n} -> {g} {rec["nombre"]}')
+                continue
+            svcs = rec.get('servicios')
+            if not svcs or r['permite'] == 'todo':        # permiso total: todos los puertos
+                continue
+            tcp = sorted({port for pr, port in map(parse_svc, svcs) if pr == 'tcp'})
+            udp = sorted({port for pr, port in map(parse_svc, svcs) if pr == 'udp'})
+            lista = lambda ps: ('![' + ','.join(map(str, ps)) + ']') if ps else 'any'
+            regla('tcp', rec['prefijo'], lista(tcp), 'flags:S,12; ',
+                  f'{n} -> {g} {rec["nombre"]} (servicio TCP no ofrecido)')
+            regla('udp', rec['prefijo'], lista(udp), '',
+                  f'{n} -> {g} {rec["nombre"]} (servicio UDP no ofrecido)')
+        regla('ip', '[172.16.0.0/12,192.168.0.0/16]', 'any', '', f'{n} -> infraestructura de gestión')
+        regla('tcp', gw, 'any', 'flags:S,12; ', f'{n} -> Core-1 (router del rol)')
+        if not r.get('internet'):
+            fuera = ','.join(pol['bloques_privados'] + ['0.0.0.0/8', '224.0.0.0/4', '255.255.255.255'])
+            regla('ip', f'![{fuera}]', 'any', '', f'{n} -> Internet')
+        otros = [subred_rol(o) for o in sorted(pol['roles']) if o != rol]
+        regla('ip', '[' + ','.join(otros) + ']', 'any', '', f'{n} -> otros usuarios')
+    return '\n'.join(out) + '\n'
+
+
 def main():
     ap = argparse.ArgumentParser(prog='r2ctl', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('cmd', choices=['validate', 'plan', 'apply', 'verify',
-                                    'stats', 'rol', 'clear', 'sesiones', 'prune'])
+                                    'stats', 'rol', 'clear', 'sesiones', 'prune',
+                                    'ids-reglas'])
     ap.add_argument('args', nargs='*')
     ap.add_argument('--roles', choices=['all'])
     a = ap.parse_args()
     pol, topo = load()
+    if a.cmd == 'ids-reglas':
+        txt = ids_reglas(pol)
+        if a.args:
+            open(a.args[0], 'w').write(txt)
+            print(f'{a.args[0]}: {txt.count(chr(10) + "alert ")} firmas')
+        else:
+            print(txt, end='')
+        return
     if a.cmd == 'validate':
         sys.exit(0 if validate(pol, topo) else 1)
     elif a.cmd == 'plan':

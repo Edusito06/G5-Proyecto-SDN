@@ -5,6 +5,8 @@ Por cada alerta envía el origen (IP y MAC, del metadato Ethernet de EVE), la fi
 y el instante del paquete que la disparó. identity identifica la sesión 802.1X del
 atacante y lo bloquea en la tabla 2 de R-SW1 (y en cuarentena si reincide).
 Agrupa alertas del mismo origen y firma durante unos segundos para no saturar.
+Las firmas de trazabilidad de R2 (sid 2000000-2999999) van al mismo endpoint:
+identity las registra como intentos denegados y no bloquea.
 """
 import json
 import os
@@ -59,7 +61,9 @@ def main():
             continue
         a = e['alert']
         src_mac = (e.get('ether') or {}).get('src_mac')
-        key = (e.get('src_ip'), a.get('signature_id'))
+        sid = a.get('signature_id') or 0
+        # R2 (sid 2xxxxxx): un aviso por origen, firma y destino; R3: por origen y firma.
+        key = (e.get('src_ip'), sid, e.get('dest_ip') if 2000000 <= sid < 3000000 else None)
         now = time.time()
         if now - recent.get(key, 0) < HOLD:
             continue
@@ -69,6 +73,7 @@ def main():
         except (KeyError, ValueError):
             ts = now
         body = {'src_ip': e.get('src_ip'), 'src_mac': src_mac, 'dest_ip': e.get('dest_ip'),
+                'dest_port': e.get('dest_port'), 'proto': e.get('proto'),
                 'firma': a.get('signature'), 'sid': a.get('signature_id'),
                 'severidad': a.get('severity'), 'ts': ts,
                 'retardo_agente_ms': int((time.time() - ts) * 1000)}   # mismo reloj (IDS)

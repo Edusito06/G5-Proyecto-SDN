@@ -48,6 +48,8 @@ sudo ip link set ids-gre up promisc on
 
 # Configuración local de Suricata (incluida desde suricata.yaml).
 sudo install -m 644 /tmp/ids/g05.rules /etc/suricata/rules/g05.rules
+# Trazabilidad de R2: generadas con `r2ctl ids-reglas` desde policy.yaml.
+sudo install -m 644 /tmp/ids/g05-r2.rules /etc/suricata/rules/g05-r2.rules
 sudo tee /etc/suricata/g05.yaml >/dev/null <<'EOF'
 %YAML 1.1
 ---
@@ -72,6 +74,7 @@ vars:
 default-rule-path: /etc/suricata/rules
 rule-files:
   - g05.rules
+  - g05-r2.rules
 af-packet:
   - interface: ids-gre
     cluster-id: 99

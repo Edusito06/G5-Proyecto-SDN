@@ -118,6 +118,19 @@ El rol viaja como VLAN = rol × 100. **R-SW1** aplica la política con el pipeli
 
 Core-1 enruta entre las VLAN de rol y los segmentos de servicios (`g02` LDAP/RADIUS, `g11` DNS/DHCP, `srv` Recursos). Su firewall (`g05-core1-router.nft`) descarta todo intento de llegar a la gestión, al plano de control, al propio Core-1 o a otro usuario.
 
+**Trazabilidad de intentos:**
+- **Qué se registra:** cada intento contra un recurso que el rol no tiene permitido, con usuario 802.1X, rol, MAC, destino y motivo. Va a `INTENTO_DENEGADO` en el registro de seguridad (`/var/log/g05/incidentes.jsonl`) y se resume por usuario y destino en `GET /identity/intentos`.
+- **Por qué con el IDS:** atribuirlo con contadores del switch costaría una regla por usuario y recurso. En cambio, el switch descarta el intento y el IDS, que ya ve el puerto de usuarios por el espejo de R3, lo reporta.
+- **Firmas:** las genera `r2ctl ids-reglas` desde `policy.yaml` (90 firmas, sid 2xxxxxx), así que la política sigue siendo la única fuente de verdad. Cubren:
+  - recursos no permitidos;
+  - puertos no ofrecidos de los recursos permitidos;
+  - la gestión;
+  - Core-1;
+  - otras subredes de usuarios;
+  - Internet, para la cuarentena.
+- **Límite:** una por par origen-destino cada 60 s.
+- **Sin bloqueo:** `identity` reconoce estas firmas por su sid, así que solo las registra y no bloquea.
+
 | Rol | VLAN | Subred | Recursos permitidos |
 |---|---|---|---|
 | 1 invitado | 100 | 10.10.0.0/24 | DNS, Mesa de ayuda, Internet |
@@ -241,7 +254,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 | Bootstrap in-band de los 6 switches | ✅ 6/6 DPID disponibles, evidencia sin diferencias |
 | Redundancia del canal de control (BFD + Fast Failover) | ✅ Probada ante caídas de enlace y de Core-1 |
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
-| **R2** sobre la topología final (roles estáticos) | ✅ 216 pruebas, 0 discrepancias; 142/142 accesos no autorizados bloqueados |
+| **R2** política por rol en R-SW1 | ✅ 216 pruebas, 0 discrepancias; 142/142 bloqueados; trazabilidad 53/53 con usuario; 200 sesiones con 1 503 reglas y 30 sesiones/s en ráfaga |
 | **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real (216 pruebas, 0 discrepancias); 21/21 accesos inválidos bloqueados; EAP-TLS en 82 ms; ~33 auth/s |
 | **R3** IDS Suricata + mitigación por ONOS | ✅ 8/8 ataques detectados y mitigados en 0,3–4,7 s, 0 falsos positivos, el testigo nunca se afecta |
 
@@ -278,7 +291,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   │   ├── r1-identidad.sh       OpenLDAP + FreeRADIUS (EAP-TLS) + PKI de prueba
 │   │   ├── kea-dhcp4.conf, g05-kea-hook.sh  Subred por rol y aviso de concesiones a identity
 │   │   ├── cluster/              Plantillas Atomix/ONOS y scripts de arranque y configuración
-│   │   ├── ids/                  R3: firmas, instalación de Suricata, agente y espejo GRE de R-SW1
+│   │   ├── ids/                  R3: firmas, Suricata, agente y espejo GRE; g05-r2.rules (trazabilidad R2, generadas)
 │   │   └── evidencia_arbol.py    Muestra del estado de cada switch
 │   ├── paper-app/                App ONOS org.g05.inband (Java, Maven) y su OAR
 │   ├── templates/                Plantilla del perfil estático anterior
@@ -287,6 +300,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
 │   ├── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
 │   ├── prueba-r1.sh              R1: accesos inválidos, latencia de autenticación y auth/s
+│   ├── prueba-r2-trazabilidad.sh R2: matriz completa cruzada con el registro de intentos
+│   ├── prueba-r2-escala.sh       R2: reglas y tiempos con 0–200 sesiones, altas y ráfagas
 │   ├── prueba-r3.sh              R3: falsos positivos y 8 ataques con tiempo de mitigación
 │   ├── carga-ids.sh              R3: sesiones maliciosas/s que el IDS soporta sin pérdidas
 │   └── incidentes.sh             R3: registro consolidado de incidentes (tabla y CSV)
@@ -298,6 +313,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── identity.py               R1: une 802.1X, rol e IP y programa R2 (servicio en ONOS-1)
 │   ├── aaa-agent.py              Eventos AAA del log de cada nodo ONOS -> identity
 │   ├── instalar-identity.sh      Instala identity (ONOS-1) y aaa-agent (ONOS-1 y ONOS-2)
+│   ├── escala.py                 Sesiones sintéticas para la prueba de escalabilidad (en ONOS-1)
 │   └── g05-r1.sh                 Cliente 802.1X/DHCP por namespace (login | logout | status | dhcp)
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
@@ -449,6 +465,40 @@ Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con B
 | 11 s | 6/6 |
 
 Atomix siguió con 2 de 3 votos sin elecciones nuevas, porque los líderes de las particiones estaban en Atomix-2 y Atomix-3. Al restaurar, ONOS-1 vuelve al clúster con la configuración intacta, que está guardada en Atomix. La medición tiene una resolución de ~3 s, porque cada vuelta consulta los 6 switches por SSH.
+
+**R2: trazabilidad** (`pruebas/prueba-r2-trazabilidad.sh`). Corre la matriz completa (`verify --roles all`, 802.1X real) y la cruza con el registro.
+
+| Métrica | Resultado |
+|---|---|
+| Matriz | 216 pruebas, 0 discrepancias, 142/142 accesos no autorizados bloqueados |
+| Pares (rol, destino) denegados que quedaron registrados | 53/53 (100 %) |
+| Registros atribuidos al usuario correcto | 53/53 |
+| Registros sobre accesos permitidos (falsos) | 0 |
+
+**R2: escalabilidad y tasa de sesiones** (`pruebas/prueba-r2-escala.sh`).
+- **Cómo se carga:** se agregan sesiones sintéticas (MAC inexistentes, roles 1–5) por el mismo camino que usa `identity`, `r2ctl.reconcile`.
+- **Cómo se mide:** el tiempo va desde la petición hasta que **OVS de R-SW1 tiene las reglas** (`ovs-ofctl`).
+- **Por qué no ONOS:** su estado `ADDED` llega ~5 s tarde, porque lo confirma con su sondeo de estadísticas.
+- **Cota superior:** los tiempos incluyen ~0,5 s de SSH y de arranque de Python, que `identity` no paga porque corre residente.
+
+| Sesiones activas | Reglas de R2 | Reglas en OVS | REST | Reglas en OVS tras | CPU OVS | RSS OVS | CPU ONOS | RSS ONOS |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 72 | 92 | 110 ms | 537 ms | 1,0 % | 50 MB | 3,6 % | 888 MB |
+| 50 | 433 | 453 | 459 ms | 1 021 ms | 1,0 % | 50 MB | 2,6 % | 888 MB |
+| 100 | 783 | 803 | 557 ms | 1 185 ms | 1,0 % | 50 MB | 2,6 % | 888 MB |
+| 200 | 1 483 | 1 503 | 950 ms | 1 692 ms | 1,2 % | 50 MB | 2,6 % | 888 MB |
+
+| Prueba | Con 0 activas | Con 200 activas |
+|---|---|---|
+| Alta de una sesión, hasta tener sus reglas en OVS (mediana de 10) | 578 ms | 1 325 ms |
+| Ráfaga de 50 sesiones nuevas | 927 ms (54 sesiones/s) | 1 655 ms (30 sesiones/s) |
+
+- **Reglas:** crecen de forma lineal, 72 fijas más **7 por sesión** (en promedio): ventana DHCP (T0), anti-spoofing IPv4 y ARP y sensor de spoofing de R3 (T1), identidad (T3) y entrega (T5). Las de broadcast por VLAN se comparten entre los usuarios del rol. OVS no nota 1 500 reglas: 1 % de CPU y 50 MB.
+- **Hardware:** en un switch con TCAM, 7 entradas por usuario significan ~1 000 usuarios por cada 7 000 entradas. Ese sería el límite real por switch de acceso, y es la razón para repartir usuarios entre varios switches de acceso.
+- **Nodos:** la política (58 reglas de T4) se repite por cada switch de acceso y no depende de los usuarios. Cada usuario solo agrega reglas en su propio switch.
+- **Lo que limita hoy:** la reconciliación de `r2ctl`, que en cada cambio compara **todas** las reglas, O(sesiones). Por eso un alta tarda ~1,3 s con 200 activas.
+- **Logins simultáneos:** `identity` agrupa los cambios que llegan durante una reconciliación (bandera `dirty`). Una ráfaga se resuelve en una sola pasada, por eso hay 30–54 sesiones/s con ráfagas y no ~1 por segundo.
+- **Mejora posible:** reconciliar solo las reglas de la sesión que cambia.
 
 **R1: accesos inválidos** (`pruebas/prueba-r1.sh invalidos 3`). Un intento cuenta como bloqueado si, tras el intento y el DHCP, no hay sesión en `identity` y el equipo no llega a ningún recurso, ni siquiera a los de invitado.
 

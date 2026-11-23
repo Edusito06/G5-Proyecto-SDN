@@ -77,7 +77,9 @@ EV_INCIDENTE = {'ALERTA_IDS', 'ALERTA_SIN_ORIGEN', 'BLOQUEO', 'BLOQUEO_RENOVADO'
                 'MITIGACION_APLICADA', 'BLOQUEO_LEVANTADO', 'BLOQUEO_VENCIDO',
                 'CUARENTENA', 'CUARENTENA_VENCIDA', 'CUARENTENA_LEVANTADA',
                 # R1: intentos fallidos (802.1X rechazado, DHCP o acceso sin sesión)
-                'SESION_RECHAZADA', 'ACCESO_DENEGADO', 'DHCP_SIN_SESION'}
+                'SESION_RECHAZADA', 'ACCESO_DENEGADO', 'DHCP_SIN_SESION',
+                # R2: intentos contra recursos que la política del rol no permite
+                'INTENTO_DENEGADO'}
 inc_lock = threading.Lock()
 
 
@@ -439,8 +441,31 @@ def do_block(mac, motivo, ttl=BLOCK_TTL, t_alerta=None, fuente='ids', extra=None
         do_quarantine(mac, f'reincidencia R3: {motivo}', 600)
 
 
+intentos = {}                # (usuario, destino) -> {n, primero, ultimo} (R2)
+
+
+def on_intento(b, s):
+    """Trazabilidad de R2: el switch ya descartó el intento; aquí solo se registra quién
+    (usuario 802.1X, rol, MAC) intentó llegar a qué recurso."""
+    usuario = s['usuario'] if s else None
+    destino = (b.get('firma') or '').split('intento denegado: ', 1)[-1]
+    k = (usuario or b.get('src_ip'), destino)
+    now = time.time()
+    with lock:
+        c = intentos.setdefault(k, {'n': 0, 'primero': now})
+        c['n'] += 1
+        c['ultimo'] = now
+    log('INTENTO_DENEGADO', usuario=usuario, rol=s['rol'] if s else None,
+        mac=s['mac'] if s else b.get('src_mac'), src_ip=b.get('src_ip'),
+        dst=f"{b.get('dest_ip')}:{b.get('dest_port') or '-'}/{b.get('proto') or '-'}",
+        recurso=destino, sid=b.get('sid'))
+    return True
+
+
 def on_alert(b):
     """Alerta de Suricata (agente del IDS): identifica al atacante y lo bloquea."""
+    if 2000000 <= int(b.get('sid') or 0) < 3000000:
+        return on_intento(b, session_of(mac=b.get('src_mac')) or session_of(ip=b.get('src_ip')))
     s = session_of(mac=b.get('src_mac')) or session_of(ip=b.get('src_ip'))
     mac = (s['mac'] if s else b.get('src_mac') or '').lower()
     if not mac:
@@ -561,6 +586,10 @@ class H(BaseHTTPRequestHandler):
                     push()
                 log('BLOQUEO_LEVANTADO', mac=arg.lower())
                 return self.reply(200)
+        if res == 'intentos' and method == 'GET':
+            with lock:
+                return self.reply(200, [{'usuario': u, 'destino': d, **c}
+                                        for (u, d), c in sorted(intentos.items())])
         if res == 'incidents' and method == 'GET':
             q = dict(x.split('=', 1) for x in self.path.partition('?')[2].split('&') if '=' in x)
             return self.reply(200, leer_incidentes(float(q.get('desde', 0) or 0)))
