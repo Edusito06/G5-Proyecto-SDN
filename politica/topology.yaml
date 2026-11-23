@@ -7,7 +7,7 @@
 # pipeline de 6 tablas. En modo `enrutado` el tráfico permitido sale de R-SW1 con
 # la VLAN de su rol hacia Core-1, que enruta hacia los servidores. Los demás
 # switches solo transportan VLAN (g05-servicios) y no reciben reglas de r2ctl.
-modo: estatico
+modo: dinamico
 enrutado: true
 
 switches:

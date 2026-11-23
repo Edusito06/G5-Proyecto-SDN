@@ -320,15 +320,19 @@ def compile_all(pol, topo, meters_by_dev, sessions=None):
             R.append(rule(dev, 0, 0, [],
                           [i_meter(meters[M_SAMPLE]), i_out('CONTROLLER')],
                           'T0 table-miss: descarta y muestrea (5 pps)'))
-            # Ventana DHCP (LLSD §4.5): puerto autenticado que aún no tiene IP.
-            for b in sin_ip:
+            # Ventana DHCP (LLSD §4.5): puerto autenticado que aún no tiene IP. En la
+            # topología enrutada el DHCP sale con la VLAN del rol (Core-1 elige la
+            # subred por la interfaz del relay) y se mantiene para las renovaciones.
+            ventana = (sin_ip + list(users.values())) if topo.get('enrutado') else sin_ip
+            for b in ventana:
+                acc = (i_push(vid(b['rol'])) + [i_tbl(5)]) if topo.get('enrutado') else [i_tbl(5)]
                 R.append(rule(dev, 0, 64000,
                               [c_in(b['puerto']), c_mac('ETH_SRC', b['mac']),
                                c_eth(0x0800), {'type': 'IP_PROTO', 'protocol': 17},
                                {'type': 'UDP_SRC', 'udpPort': 68},
                                {'type': 'UDP_DST', 'udpPort': 67}],
-                              [i_tbl(5)],
-                              f'T0 ventana DHCP {b.get("usuario", b["mac"])} (sin IP)'))
+                              acc,
+                              f'T0 ventana DHCP {b.get("usuario", b["mac"])} (rol {b["rol"]})'))
             for h, u in users.items():
                 p, m = u['puerto'], u['mac']
                 R.append(rule(dev, 1, 50000,
@@ -353,7 +357,9 @@ def compile_all(pol, topo, meters_by_dev, sessions=None):
             # (ARP/BDDP al controlador), o el ARP no se reenvía en el core.
             R.append(rule(dev, 0, 60000, [], [i_tbl(5)], 'T0 core: todo a T5'))
         if topo.get('enrutado') and info['funcion'] == 'acceso':
-            R.extend(tabla5_enrutada(dev, info, users))
+            activos = dict(users)
+            activos.update({b.get('nombre', b['mac']): b for b in sin_ip if b.get('rol')})
+            R.extend(tabla5_enrutada(dev, info, activos))
             continue
         # tabla 5: reenvío proactivo por MAC destino + inundación de broadcast
         for m, (h, sw_h, p_h) in macs.items():
@@ -790,17 +796,29 @@ def wait_session(topo, h, rol=None, timeout=60):
 
 def host_login(topo, h, rol):
     """Lleva a un host al rol pedido usando 802.1X, invitado o cuarentena."""
-    mac = topo['usuarios'][h]['mac'].lower()
+    u = topo['usuarios'][h]
+    mac = u['mac'].lower()
+    ns = u['ns']
+
+    def sh(cmd):
+        return ssh(u['nodo'], cmd, timeout=120)
+    sh(f'sudo g05-r1 logout {ns}')
+    identity_call('DELETE', f'/identity/sessions/{mac}')
     if rol == 1:
         identity_call('POST', f'/identity/guest/{mac}')
-        ssh(h, 'sudo r1-up --guest', timeout=90)
+        wait_sync()
+        sh(f'sudo g05-r1 dhcp {ns}')
     elif rol == 9:
         host_login(topo, h, 2)
         identity_call('POST', f'/identity/quarantine/{mac}',
                       {'motivo': 'prueba de verify', 'ttl': 600})
+        wait_sync()
+        sh(f'sudo g05-r1 dhcp {ns}')
     else:
         identity_call('DELETE', f'/identity/quarantine/{mac}')
-        ssh(h, f'sudo r1-up {LOGIN_USER[rol]}', timeout=90)
+        sh(f'sudo g05-r1 login {ns} {LOGIN_USER[rol]}')
+        wait_sync()
+        sh(f'sudo g05-r1 dhcp {ns}')
     b = wait_session(topo, h, rol)
     if not b:
         print(f'  AVISO: {h} no llegó al rol {rol}')

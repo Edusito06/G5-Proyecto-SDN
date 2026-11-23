@@ -127,6 +127,47 @@ Core-1 enruta entre las VLAN de rol y los segmentos de servicios (`g02` LDAP/RAD
 | 5 admin | 500 | 10.50.0.0/24 | Todo (salvo la infraestructura de control y gestión) |
 | 9 cuarentena | 900 | 10.90.0.0/24 | DNS y Mesa de ayuda, sin Internet |
 
+### R1: autenticación 802.1X y rol dinámico
+
+```mermaid
+sequenceDiagram
+    participant U as Usuario (wpa_supplicant)
+    participant S as R-SW1
+    participant A as ONOS (app AAA)
+    participant R as FreeRADIUS + OpenLDAP
+    participant I as identity (ONOS-1)
+    participant K as Kea (vía relay en Core-1)
+    U->>S: EAPOL (EAP-TLS)
+    S->>A: Packet-In (T0: EAPOL al controlador)
+    A->>R: Access-Request (red de gestión)
+    R->>R: certificado + usuario en LDAP + grupo -> VLAN del rol
+    R->>I: POST /identity/sessions (usuario, VLAN)
+    R->>A: Access-Accept
+    A->>U: EAP-Success
+    A-->>I: evento APPROVED (aaa-agent del nodo master)
+    I->>S: r2ctl por ONOS: ventana DHCP con la VLAN del rol
+    U->>K: DHCP (VLAN del rol -> subred del rol)
+    K->>I: hook run_script (MAC, IP)
+    I->>S: anti-spoofing (T1) + identidad (T3)
+```
+
+| Componente | Dónde | Función |
+|---|---|---|
+| App AAA `org.opencord.aaa` 2.11.2 (+ SADIS 5.12.3) | Clúster ONOS | Autenticador 802.1X: recibe el EAPOL por Packet-In y habla RADIUS con FreeRADIUS |
+| FreeRADIUS 3.2 + OpenLDAP 2.6 | ldap-radius | EAP-TLS con la CA del campus. El grupo de LDAP fija el rol (`Tunnel-Private-Group-Id` = VLAN). Usuario sin grupo: rechazado. `ppolicy` bloquea tras 5 fallos. Exige `Message-Authenticator` (Blast-RADIUS) |
+| `identity` (`politica/identity.py`) | ONOS-1, `g05-identity.service` | Une la sesión 802.1X, el rol y la IP, y reconcilia las reglas de R2 por ONOS |
+| `aaa-agent` (`politica/aaa-agent.py`) | ONOS-1 y ONOS-2 | Reenvía a `identity` los eventos AAA del log del nodo master (STARTED, APPROVED, FAILURE, IDLE) |
+| Kea + hook `run_script` | dns-dhcp | Una subred por rol, según la interfaz del relay. Cada concesión se avisa a `identity` |
+| `g05-r1` (`politica/g05-r1.sh`) | Alumno | Login, logout y DHCP 802.1X por namespace |
+
+Las claves y certificados de prueba se generan en la VM ldap-radius (`/root/g05-r1`, solo root) y **no se versionan**.
+
+**Limitaciones encontradas:**
+- La app AAA mantiene **un supplicant autenticado por puerto**, como un puerto de acceso real. Los usuarios de prueba comparten el único puerto de la VM Alumno, así que las pruebas usan un supplicant a la vez.
+- La REST de AAA **no refleja el EAPOL-Logoff**. `identity` lo detecta con el evento IDLE del log y el contador EAPOL del puerto.
+- El VNRT descarta la MAC de grupo de EAPOL. `g05-r1` reescribe el EAPOL saliente a broadcast con `tc`. El supplicant puede no ver el EAP-Failure, pero sin sesión en `identity` no hay DHCP ni reglas.
+- Con EAP-TLS no hay contraseña, así que el bloqueo de `ppolicy` solo aplica a métodos que hacen `bind` contra LDAP.
+
 ### Servicios: DHCP de alumnos
 
 Cada segmento de servicio es un circuito L2 transportado con una VLAN entre switches y entregado sin etiqueta en sus extremos (`g05-servicios`, prioridad 50000):
@@ -164,7 +205,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 | Redundancia del canal de control (BFD + Fast Failover) | ✅ Probada ante caídas de enlace y de Core-1 |
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
 | **R2** sobre la topología final (roles estáticos) | ✅ 216 pruebas, 0 discrepancias; 142/142 accesos no autorizados bloqueados |
-| R1 (802.1X dinámico) y R3 | 🔜 Pendiente |
+| **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real: 216 pruebas, 0 discrepancias; logoff y rechazo verificados |
+| R3 (IDS) | 🔜 Pendiente |
 
 ---
 
@@ -196,6 +238,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   │   ├── g05-servicios.py      Segmentos de servicio (apply | status | remove)
 │   │   ├── g05-core1-router.nft  Firewall de Core-1 como router
 │   │   ├── servidores.sh, svc.py IPs por recurso, ruta de vuelta y servicios de prueba
+│   │   ├── r1-identidad.sh       OpenLDAP + FreeRADIUS (EAP-TLS) + PKI de prueba
+│   │   ├── kea-dhcp4.conf, g05-kea-hook.sh  Subred por rol y aviso de concesiones a identity
 │   │   ├── cluster/              Plantillas Atomix/ONOS y scripts de arranque y configuración
 │   │   └── evidencia_arbol.py    Muestra del estado de cada switch
 │   ├── paper-app/                App ONOS org.g05.inband (Java, Maven) y su OAR
@@ -208,7 +252,10 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── r2ctl.py                  Compilador y despliegue de la política por ONOS (modo enrutado)
 │   ├── policy.yaml               Recursos G01–G12 y permisos por rol
 │   ├── topology.yaml             R-SW1, usuarios de prueba y parámetros de verificación
-│   └── usuarios-ns.sh            Un namespace por rol en la VM Alumno (macvlan + IP fija)
+│   ├── usuarios-ns.sh            Un namespace por usuario de prueba en la VM Alumno (macvlan)
+│   ├── identity.py               R1: une 802.1X, rol e IP y programa R2 (servicio en ONOS-1)
+│   ├── aaa-agent.py              Eventos AAA del log de cada nodo ONOS -> identity
+│   └── g05-r1.sh                 Cliente 802.1X/DHCP por namespace (login | logout | status | dhcp)
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
     └── r2/                       r2ctl: despliegue declarativo de la política R2
@@ -310,7 +357,21 @@ python3 r2ctl.py stats               # ocupación de tablas y contadores de la t
 
 Requiere `pyyaml` y los canales SSH a ONOS-1 (5806) y a Alumno (5813). En Alumno, `g05-usuarios` crea los namespaces `u-inv`, `u-alu`, `u-doc`, `u-adm`, `u-net` y `u-cic`.
 
-**Resultados (Fase A):**
+En modo **dinámico** (`modo: dinamico` en `topology.yaml`) las vinculaciones vienen de `identity`, y `verify --roles all` recorre los roles **autenticando por 802.1X**: `admin01`, `adm01`, `doc01` y `alu01`, más invitado y cuarentena.
+
+**Resultados de R1 (802.1X real, un rol tras otro):**
+
+| Métrica | Valor |
+|---|---|
+| Pruebas (6 roles × 36 destinos) | 216, 0 discrepancias |
+| Precisión en la restricción | 142/142 (100 %) |
+| RADIUS acepta → sesión con ventana DHCP | mediana 38 ms (máx. 63 ms) |
+| Autorización → IP vinculada (incluye el cliente DHCP) | mediana 4,3 s (máx. 10,7 s) |
+| Reconciliación de reglas en ONOS | mediana 167 ms (máx. 532 ms) |
+| Usuario válido sin grupo de red (`sing01`) | Rechazado: sin sesión, sin DHCP, sin acceso |
+| EAPOL-Logoff | Sesión cerrada y acceso retirado en < 10 s |
+
+**Resultados de R2 con roles estáticos (Fase A):**
 
 | Métrica | Valor |
 |---|---|
@@ -394,7 +455,7 @@ python3 r2/r2ctl.py validate   # también: plan, apply, verify, stats, rol, clea
 
 ## Hoja de ruta
 
-1. **R1 (Fase B):** 802.1X con FreeRADIUS + OpenLDAP y la app AAA de ONOS; `identity` une sesión, rol e IP (con Kea) y reemplaza las asignaciones estáticas. Incluye la ventana DHCP por rol (hoy el Alumno sin namespace queda sin DHCP, porque el puerto lo gobierna R2).
+1. **Puertos de acceso adicionales** para probar varios supplicants simultáneos (hoy solo hay un puerto de usuarios).
 2. **R3:** Suricata con espejo en R-SW1 y mitigación por la API REST de ONOS.
 3. **Prueba física de DF1:** apagar DC-DIST y comprobar que el control sigue por ONOS-2.
 
