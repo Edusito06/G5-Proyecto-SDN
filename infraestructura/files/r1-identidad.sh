@@ -120,6 +120,53 @@ chown -R freerad:freerad $D
 chmod 640 server.key ca.key; chmod 644 ca.pem server.pem clientes/*.pem; chmod 600 clientes/*.key
 EOF
 
+
+# Revocación (CRL): base mínima de `openssl ca`. FreeRADIUS valida contra ca-crl.pem
+# (CA + CRL vigente, check_crl = yes). Revocar: sudo g05-revocar <cert.pem>
+sudo bash -s <<'EOF'
+set -e
+D=/etc/freeradius/3.0/certs-r1; cd $D
+mkdir -p ca-db; touch ca-db/index.txt; [ -f ca-db/crlnumber ] || echo 1000 > ca-db/crlnumber
+cat > ca-db/ca.cnf <<'CNF'
+[ ca ]
+default_ca = g05
+[ g05 ]
+dir = /etc/freeradius/3.0/certs-r1
+database = $dir/ca-db/index.txt
+crlnumber = $dir/ca-db/crlnumber
+new_certs_dir = $dir/ca-db
+certificate = $dir/ca.pem
+private_key = $dir/ca.key
+serial = $dir/ca.srl
+default_md = sha256
+default_crl_days = 365
+default_days = 825
+policy = libre
+unique_subject = no
+copy_extensions = none
+[ libre ]
+commonName = supplied
+countryName = optional
+organizationName = optional
+CNF
+openssl ca -config ca-db/ca.cnf -gencrl -out crl.pem 2>/dev/null
+cat ca.pem crl.pem > ca-crl.pem
+chown -R freerad:freerad ca-db crl.pem ca-crl.pem
+EOF
+sudo tee /usr/local/sbin/g05-revocar >/dev/null <<'EOF'
+#!/bin/bash
+# Revoca un certificado de usuario de R1 y publica la CRL nueva en FreeRADIUS.
+set -euo pipefail
+D=/etc/freeradius/3.0/certs-r1
+openssl ca -config $D/ca-db/ca.cnf -revoke "${1:?uso: g05-revocar <cert.pem>}" 2>&1 | tail -1
+openssl ca -config $D/ca-db/ca.cnf -gencrl -out $D/crl.pem 2>/dev/null
+cat $D/ca.pem $D/crl.pem > $D/ca-crl.pem
+chown freerad:freerad $D/crl.pem $D/ca-crl.pem
+systemctl restart freeradius
+echo "CRL: $(openssl crl -in $D/crl.pem -noout -text | grep -c 'Serial Number') certificados revocados"
+EOF
+sudo chmod 755 /usr/local/sbin/g05-revocar
+
 # ------------------------------------------------------------------ FreeRADIUS
 R=/etc/freeradius/3.0
 SECRET=$(sudo cat $C/radius_secret)
@@ -127,6 +174,8 @@ SECRET=$(sudo cat $C/radius_secret)
   for ip in $NAS_IPS; do
     printf 'client onos-%s {\n    ipaddr = %s\n    secret = %s\n    shortname = onos\n    require_message_authenticator = yes\n}\n' "${ip##*.}" "$ip" "$SECRET"
   done
+  # Cliente local para las pruebas de carga con eapol_test (solo desde esta VM).
+  printf 'client pruebas-local {\n    ipaddr = 127.0.0.1\n    secret = %s\n    shortname = pruebas\n    require_message_authenticator = yes\n}\n' "$SECRET"
 } | sudo tee $R/clients.conf >/dev/null
 
 sudo tee $R/mods-available/ldap >/dev/null <<EOF
@@ -186,7 +235,8 @@ eap {
     tls-config tls-common {
         private_key_file = /etc/freeradius/3.0/certs-r1/server.key
         certificate_file = /etc/freeradius/3.0/certs-r1/server.pem
-        ca_file = /etc/freeradius/3.0/certs-r1/ca.pem
+        ca_file = /etc/freeradius/3.0/certs-r1/ca-crl.pem
+        check_crl = yes
         cipher_list = "DEFAULT"
         tls_min_version = "1.2"
         tls_max_version = "1.2"
@@ -212,6 +262,7 @@ server default {
         # El usuario debe existir en LDAP y no estar bloqueado por ppolicy.
         ldap
         if (notfound) {
+            update request { &Module-Failure-Message := "usuario inexistente en LDAP" }
             reject
         }
         if (&control:Tmp-String-0) {
@@ -239,6 +290,7 @@ server default {
             update reply { &Tunnel-Private-Group-Id := "200" }
         }
         else {
+            update request { &Module-Failure-Message := "usuario sin grupo de red" }
             reject                      # usuario válido sin grupo de red
         }
         update reply {
@@ -285,6 +337,8 @@ sudo ln -sf $R/mods-available/rest $R/mods-enabled/rest
 sudo rm -f $R/sites-enabled/inner-tunnel
 sudo chown -R freerad:freerad $R/mods-available/ldap $R/mods-available/eap $R/mods-available/rest $R/sites-available/default $R/clients.conf
 sudo chmod 640 $R/mods-available/ldap $R/clients.conf
+# Registro de autenticaciones (R1: intentos fallidos registrados) en radius.log.
+sudo sed -i 's/^\(\s*\)auth = no/\1auth = yes/' $R/radiusd.conf
 sudo freeradius -C >/tmp/frc.log 2>&1 || { tail -15 /tmp/frc.log; exit 1; }
 sudo systemctl enable freeradius slapd >/dev/null 2>&1
 sudo systemctl restart freeradius

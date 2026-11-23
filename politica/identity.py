@@ -70,12 +70,14 @@ dirty = threading.Event()
 busy = threading.Event()
 
 
-# Registro de incidentes (R3): los eventos de seguridad se guardan además, con fecha
+# Registro de seguridad (R1 y R3): los eventos de seguridad se guardan además, con fecha
 # completa, en un JSONL persistente que consulta GET /identity/incidents.
 INCIDENTES = os.environ.get('G05_INCIDENTES', '/var/log/g05/incidentes.jsonl')
 EV_INCIDENTE = {'ALERTA_IDS', 'ALERTA_SIN_ORIGEN', 'BLOQUEO', 'BLOQUEO_RENOVADO',
                 'MITIGACION_APLICADA', 'BLOQUEO_LEVANTADO', 'BLOQUEO_VENCIDO',
-                'CUARENTENA', 'CUARENTENA_VENCIDA', 'CUARENTENA_LEVANTADA'}
+                'CUARENTENA', 'CUARENTENA_VENCIDA', 'CUARENTENA_LEVANTADA',
+                # R1: intentos fallidos (802.1X rechazado, DHCP o acceso sin sesión)
+                'SESION_RECHAZADA', 'ACCESO_DENEGADO', 'DHCP_SIN_SESION'}
 inc_lock = threading.Lock()
 
 

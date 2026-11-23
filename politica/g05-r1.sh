@@ -3,7 +3,8 @@
 # Cada usuario de prueba vive en su namespace (ver usuarios-ns.sh) con una macvlan
 # del mismo nombre; wpa_supplicant corre dentro del namespace.
 #
-#   g05-r1 login  <ns> <usuario>   autentica (admin01, adm01, doc01, alu01, sing01)
+#   g05-r1 login  <ns> <usuario> [cert]   autentica (admin01, adm01, doc01, alu01, sing01);
+#                                  cert: otro certificado de $PKI (pruebas de accesos inválidos)
 #   g05-r1 logout <ns>             EAPOL-Logoff y fin del supplicant
 #   g05-r1 status <ns>             estado de la autenticación
 #   g05-r1 dhcp   <ns>             pide IP por DHCP dentro del namespace
@@ -18,7 +19,8 @@ run() { ip netns exec "$ns" "$@"; }
 case "$accion" in
   login)
     usuario=${3:?falta el usuario}
-    conf=/etc/wpa_supplicant/r1-$usuario.conf
+    cert=${4:-$usuario}
+    conf=/etc/wpa_supplicant/r1-$ns.conf
     cat > "$conf" <<EOF
 ctrl_interface=/run/wpa_supplicant-$ns
 ap_scan=0
@@ -27,8 +29,8 @@ network={
     eap=TLS
     identity="$usuario"
     ca_cert="$PKI/ca.pem"
-    client_cert="$PKI/$usuario.pem"
-    private_key="$PKI/$usuario.key"
+    client_cert="$PKI/$cert.pem"
+    private_key="$PKI/$cert.key"
     eapol_flags=0
 }
 EOF
@@ -39,7 +41,7 @@ EOF
         dst_mac 01:80:c2:00:00:03 action pedit ex munge eth dst set ff:ff:ff:ff:ff:ff pipe
     [ -f "/run/wpa-$ns.pid" ] && kill "$(cat /run/wpa-$ns.pid)" 2>/dev/null && sleep 1 || true
     : > "/tmp/wpa-$ns.log"
-    run wpa_supplicant -B -D wired -i "$ns" -c "$conf" -P "/run/wpa-$ns.pid" -f "/tmp/wpa-$ns.log"
+    run wpa_supplicant -B -t -D wired -i "$ns" -c "$conf" -P "/run/wpa-$ns.pid" -f "/tmp/wpa-$ns.log"
     # Resultado final: el Access-Reject llega como EAP-Failure después del túnel TLS,
     # así que se espera a que AAA responda y se mira el último evento EAP.
     res="sin respuesta"

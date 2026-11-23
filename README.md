@@ -168,6 +168,11 @@ Las claves y certificados de prueba se generan en la VM ldap-radius (`/root/g05-
 - El VNRT descarta la MAC de grupo de EAPOL. `g05-r1` reescribe el EAPOL saliente a broadcast con `tc`. El supplicant puede no ver el EAP-Failure, pero sin sesión en `identity` no hay DHCP ni reglas.
 - Con EAP-TLS no hay contraseña, así que el bloqueo de `ppolicy` solo aplica a métodos que hacen `bind` contra LDAP.
 
+**Controles de la credencial:**
+- **CN = identidad:** `check_cert_cn` impide presentar un certificado propio con la identidad de otro.
+- **Revocación por CRL:** `check_crl`, con `sudo g05-revocar <cert.pem>` en ldap-radius.
+- **Registro:** FreeRADIUS guarda cada intento en `radius.log` (`Login OK` / `Login incorrect (motivo)`). identity guarda los rechazos (`SESION_RECHAZADA`, `DHCP_SIN_SESION`, `ACCESO_DENEGADO`) en `/var/log/g05/incidentes.jsonl`.
+
 ### R3: detección y mitigación de ataques encubiertos
 
 ```mermaid
@@ -237,7 +242,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 | Redundancia del canal de control (BFD + Fast Failover) | ✅ Probada ante caídas de enlace y de Core-1 |
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
 | **R2** sobre la topología final (roles estáticos) | ✅ 216 pruebas, 0 discrepancias; 142/142 accesos no autorizados bloqueados |
-| **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real: 216 pruebas, 0 discrepancias; logoff y rechazo verificados |
+| **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real (216 pruebas, 0 discrepancias); 21/21 accesos inválidos bloqueados; EAP-TLS en 82 ms; ~33 auth/s |
 | **R3** IDS Suricata + mitigación por ONOS | ✅ 8/8 ataques detectados y mitigados en 0,3–4,7 s, 0 falsos positivos, el testigo nunca se afecta |
 
 ---
@@ -281,6 +286,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 ├── pruebas/
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
 │   ├── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
+│   ├── prueba-r1.sh              R1: accesos inválidos, latencia de autenticación y auth/s
 │   ├── prueba-r3.sh              R3: falsos positivos y 8 ataques con tiempo de mitigación
 │   ├── carga-ids.sh              R3: sesiones maliciosas/s que el IDS soporta sin pérdidas
 │   └── incidentes.sh             R3: registro consolidado de incidentes (tabla y CSV)
@@ -443,6 +449,58 @@ Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con B
 | 11 s | 6/6 |
 
 Atomix siguió con 2 de 3 votos sin elecciones nuevas, porque los líderes de las particiones estaban en Atomix-2 y Atomix-3. Al restaurar, ONOS-1 vuelve al clúster con la configuración intacta, que está guardada en Atomix. La medición tiene una resolución de ~3 s, porque cada vuelta consulta los 6 switches por SSH.
+
+**R1: accesos inválidos** (`pruebas/prueba-r1.sh invalidos 3`). Un intento cuenta como bloqueado si, tras el intento y el DHCP, no hay sesión en `identity` y el equipo no llega a ningún recurso, ni siquiera a los de invitado.
+
+| Intento | Veces | Bloqueado | Motivo registrado |
+|---|---|---|---|
+| Usuario válido sin grupo de red (sing01) | 3 | 3/3 | `usuario sin grupo de red` |
+| Usuario inexistente en LDAP, certificado de la CA del campus | 3 | 3/3 | `usuario inexistente en LDAP` |
+| Certificado caducado | 3 | 3/3 | `certificate has expired` |
+| Certificado revocado (CRL) | 3 | 3/3 | `certificate revoked` |
+| Certificado de una CA ajena | 3 | 3/3 | `unable to get local issuer certificate` |
+| Suplantación: identidad admin01 con el certificado de alu01 | 3 | 3/3 | CN distinto de la identidad (`check_cert_cn`) |
+| Sin 802.1X, solo DHCP | 1 | 1/1 | Sin sesión: no obtiene IP ni acceso |
+| IP estática sin autenticar | 1 | 1/1 | Sin sesión: no hay reglas para esa MAC |
+| IP de un alumno autenticado usada desde otro equipo | 1 | 1/1 | T1 anti-spoofing (MAC + IP + puerto) |
+
+- **Resultado:** 21/21 accesos inválidos bloqueados (100 %).
+- **Control:** alu01 legítimo mantiene 3/3 recursos, incluso mientras otro equipo usa su IP.
+- **Registro:** cada intento fallido quedó en `radius.log` con su motivo.
+- **EAP-Failure perdido:** el supplicant de sing01 informa éxito porque el VNRT descartó el EAP-Failure, pero no obtiene ni IP ni acceso.
+
+**R1: latencia de autenticación** (`pruebas/prueba-r1.sh latencia 12`): 12 logins rotando alu01, doc01, adm01 y admin01, medidos con el reloj de la VM Alumno.
+
+| Tramo | Mediana | p95 |
+|---|---|---|
+| Arranque del supplicant → EAP-Success | 2 106 ms | 2 154 ms |
+| Intercambio EAP-TLS (EAP-Started → Success) | 82 ms | 131 ms |
+| DHCP (DISCOVER → IP configurada) | 6 824 ms | 10 794 ms |
+| IP → primer acceso permitido (Portal) | 22 ms | 24 ms |
+| **Total, del arranque al acceso** | **9 024 ms** | **12 993 ms** |
+
+- **Lo que cuesta la red:** la autenticación (82 ms) y la apertura del acceso (22 ms; ONOS ya instaló las reglas al aprobar la sesión). Esta parte es de unos 100 ms.
+- **Espera inicial:** los ~2 s antes del EAP son la espera del propio supplicant antes de empezar.
+- **DHCP:** casi todo es la comprobación de IP duplicada por ARP de dhcpcd (RFC 5227). Con `--noarp` la concesión baja de 7,2 s a 2,0 s.
+
+**R1: autenticaciones por segundo** (`pruebas/prueba-r1.sh carga`). Cada una es una autenticación EAP-TLS completa con `eapol_test` contra FreeRADIUS: túnel TLS, búsqueda en LDAP del usuario y sus grupos, y aviso REST a `identity`.
+
+| En paralelo | Autenticaciones | Fallos | Auth/s | CPU de FreeRADIUS |
+|---|---|---|---|---|
+| 1 | 40 | 0 | 31,5 | 17 % |
+| 2 | 40 | 0 | 33,2 | 17 % |
+| 4 | 40 | 0 | 33,0 | 18 % |
+| 8 | 80 | 0 | 34,1 | 19 % |
+| 16 | 160 | 0 | 33,3 | 18 % |
+
+- **Throughput:** unas 33 autenticaciones/s sin fallos, unas 120 000 por hora.
+- **Es un piso:** el generador corre en la misma VM de 1 vCPU que el servidor y FreeRADIUS usa menos del 20 % de CPU.
+- **El límite del sistema completo es otro:** la app AAA de ONOS atiende un supplicant autenticado por puerto.
+
+**R1: escalabilidad de roles:**
+- **Agregar un rol** cuesta un grupo LDAP, una rama en el `post-auth` (VLAN = rol × 100), una subred en Kea y sus permisos en `policy.yaml`.
+- **Coste en el switch:** las reglas de política crecen con roles × recursos; hoy son 58 para 6 roles.
+- **Coste por usuario:** cada usuario suma reglas fijas (T1 anti-spoofing y T3 identidad), sin importar cuántos roles existan.
 
 **R3: ataques desde un usuario autenticado** (`pruebas/prueba-r3.sh`). El atacante es alu01 (802.1X) y comparte el puerto con un testigo invitado. Por ataque se mide, con el reloj de la VM Alumno, cuánto tarda el atacante en perder el acceso al Portal, que su rol sí permite. Antes de atacar se generan 60 s de tráfico legítimo (Portal, Mesa de ayuda, DNS y accesos denegados por R2).
 
