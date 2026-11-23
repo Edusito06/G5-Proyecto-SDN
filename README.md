@@ -4,7 +4,7 @@ Proyecto del curso **TEL354 – Redes Definidas por Software** (PUCP, 2026-2), g
 
 Solución SDN para una red de campus académico desplegada sobre el *private cloud* **VNRT**: un clúster de control **ONOS** de dos nodos, respaldado por **Atomix** (Raft, 3 nodos), gobierna seis switches **Open vSwitch** mediante **OpenFlow 1.3**. El canal de control viaja **in-band** por la propia red de datos, con caminos de respaldo que se activan en menos de un segundo ante la caída de enlaces o de un switch de núcleo.
 
-Requerimientos del grupo: **R1** (control de acceso por rol), **R2** (protección de recursos privilegiados) y **R3** (detección y mitigación de ataques encubiertos en la intranet).
+Requerimientos del grupo: **R1** (control de acceso por rol), **R2** (protección de recursos privilegiados) y **R3** (detección y mitigación de ataques encubiertos en la intranet). Como grupo de 4 se suma **R4** (mitigación de DDoS).
 
 ---
 
@@ -111,7 +111,7 @@ El rol viaja como VLAN = rol × 100. **R-SW1** aplica la política con el pipeli
 |---|---|
 | T0 | Ingreso: LLDP/EAPOL al controlador, tráfico de usuario a T1, tráfico de red a T5 |
 | T1 | Anti-spoofing: puerto + MAC + IP de cada usuario |
-| T2 | Mitigación (reservada para R3) |
+| T2 | Mitigación de R3: descarte de la MAC de un atacante detectado |
 | T3 | Identidad: MAC → `push_vlan` del rol |
 | T4 | Política por rol (58 reglas): recursos permitidos, bloqueo del bloque crítico con meter, bloqueo de la intranet |
 | T5 | Salida hacia Core-1 con la VLAN del rol y entrega a cada usuario por MAC |
@@ -168,6 +168,38 @@ Las claves y certificados de prueba se generan en la VM ldap-radius (`/root/g05-
 - El VNRT descarta la MAC de grupo de EAPOL. `g05-r1` reescribe el EAPOL saliente a broadcast con `tc`. El supplicant puede no ver el EAP-Failure, pero sin sesión en `identity` no hay DHCP ni reglas.
 - Con EAP-TLS no hay contraseña, así que el bloqueo de `ppolicy` solo aplica a métodos que hacen `bind` contra LDAP.
 
+### R3: detección y mitigación de ataques encubiertos
+
+```mermaid
+sequenceDiagram
+    participant A as Atacante (alu01, 802.1X)
+    participant S as R-SW1
+    participant D as IDS (Suricata)
+    participant I as identity (ONOS-1)
+    participant O as ONOS
+    A->>S: escaneo / spoofing / request malicioso
+    S-->>D: copia de ens7 dentro de GRE (espejo OVSDB)
+    D->>D: firma G05 (eve.json con MAC)
+    D->>I: ids-agent: POST /identity/alert (IP, MAC, sid)
+    I->>O: regla T2 drop eth_src=MAC (TTL 300 s)
+    O->>S: FlowMod
+    Note over I: 3 alertas en 10 min -> cuarentena (VLAN 900)
+```
+
+| Pieza | Dónde | Qué hace |
+|---|---|---|
+| Espejo `g05-ids` (`files/ids/g05-espejo.sh`) | R-SW1, `g05-espejo.service` | Copia ens7 (usuarios) en ambos sentidos a un puerto GRE (`key 4735`) hacia 192.168.0.22. Es un espejo de OVSDB y no toca el pipeline de OpenFlow |
+| Suricata 7 (`files/ids/ids-setup.sh`) | VM IDS, interfaz `ids-gre` (gretap) | Solo las firmas del G05 (`files/ids/g05.rules`), EVE con MAC de origen |
+| `ids-agent` (`files/ids/ids-agent.py`) | VM IDS | Sigue `eve.json` y envía cada alerta a `identity` (deduplicada 5 s) |
+| Sensor de spoofing | `identity` + regla T1 prioridad 45000 por usuario | Cuenta los paquetes con IP de origen ajena que T1 ya descarta. Si suben ≥ 5 en 2 s, bloquea la MAC sin depender del IDS |
+| Registro de incidentes | ONOS-1, `/var/log/g05/incidentes.jsonl` | Alerta → bloqueo → regla aplicada → fin. Se consulta con `GET /identity/incidents` o `pruebas/incidentes.sh` |
+
+**Firmas:** escaneo de puertos (SYN a puertos no ofrecidos), barrido ICMP, escaneo TCP de red, IP spoofing, inyección SQL, XSS, path traversal (sobre la URI cruda), herramientas de ataque por User-Agent, ráfaga de requests HTTP (bot) e inundación de SYN. Los umbrales se calibraron con la matriz de R2 y con tráfico legítimo, para no dar falsos positivos.
+
+**Mitigación:** se bloquea la **MAC autenticada** del atacante, no su IP, que puede ser falsa. El bloqueo afecta solo a ese usuario; los demás usuarios del mismo puerto no lo notan. Vence a los 300 s, o antes con `DELETE /identity/block/<mac>`. La reincidencia (3 alertas en 10 min) lo pasa a cuarentena.
+
+**Limitaciones del VNRT:** el enlace directo R-SW1/ens6 → IDS solo entrega tramas dirigidas a la MAC del IDS (y broadcast): el espejo unicast se perdía. Por eso el espejo viaja en GRE por la red de gestión, como un ERSPAN.
+
 ### Servicios: DHCP de alumnos
 
 Cada segmento de servicio es un circuito L2 transportado con una VLAN entre switches y entregado sin etiqueta en sus extremos (`g05-servicios`, prioridad 50000):
@@ -206,7 +238,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
 | **R2** sobre la topología final (roles estáticos) | ✅ 216 pruebas, 0 discrepancias; 142/142 accesos no autorizados bloqueados |
 | **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real: 216 pruebas, 0 discrepancias; logoff y rechazo verificados |
-| R3 (IDS) | 🔜 Pendiente |
+| **R3** IDS Suricata + mitigación por ONOS | ✅ 8/8 ataques detectados y mitigados en 0,3–4,7 s, 0 falsos positivos, el testigo nunca se afecta |
 
 ---
 
@@ -241,13 +273,17 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   │   ├── r1-identidad.sh       OpenLDAP + FreeRADIUS (EAP-TLS) + PKI de prueba
 │   │   ├── kea-dhcp4.conf, g05-kea-hook.sh  Subred por rol y aviso de concesiones a identity
 │   │   ├── cluster/              Plantillas Atomix/ONOS y scripts de arranque y configuración
+│   │   ├── ids/                  R3: firmas, instalación de Suricata, agente y espejo GRE de R-SW1
 │   │   └── evidencia_arbol.py    Muestra del estado de cada switch
 │   ├── paper-app/                App ONOS org.g05.inband (Java, Maven) y su OAR
 │   ├── templates/                Plantilla del perfil estático anterior
 │   └── evidencia/                Evidencia JSON generada en el slice
 ├── pruebas/
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
-│   └── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
+│   ├── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
+│   ├── prueba-r3.sh              R3: falsos positivos y 8 ataques con tiempo de mitigación
+│   ├── carga-ids.sh              R3: sesiones maliciosas/s que el IDS soporta sin pérdidas
+│   └── incidentes.sh             R3: registro consolidado de incidentes (tabla y CSV)
 ├── politica/                     R2 sobre el slice final
 │   ├── r2ctl.py                  Compilador y despliegue de la política por ONOS (modo enrutado)
 │   ├── policy.yaml               Recursos G01–G12 y permisos por rol
@@ -255,6 +291,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── usuarios-ns.sh            Un namespace por usuario de prueba en la VM Alumno (macvlan)
 │   ├── identity.py               R1: une 802.1X, rol e IP y programa R2 (servicio en ONOS-1)
 │   ├── aaa-agent.py              Eventos AAA del log de cada nodo ONOS -> identity
+│   ├── instalar-identity.sh      Instala identity (ONOS-1) y aaa-agent (ONOS-1 y ONOS-2)
 │   └── g05-r1.sh                 Cliente 802.1X/DHCP por namespace (login | logout | status | dhcp)
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
@@ -407,6 +444,42 @@ Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con B
 
 Atomix siguió con 2 de 3 votos sin elecciones nuevas, porque los líderes de las particiones estaban en Atomix-2 y Atomix-3. Al restaurar, ONOS-1 vuelve al clúster con la configuración intacta, que está guardada en Atomix. La medición tiene una resolución de ~3 s, porque cada vuelta consulta los 6 switches por SSH.
 
+**R3: ataques desde un usuario autenticado** (`pruebas/prueba-r3.sh`). El atacante es alu01 (802.1X) y comparte el puerto con un testigo invitado. Por ataque se mide, con el reloj de la VM Alumno, cuánto tarda el atacante en perder el acceso al Portal, que su rol sí permite. Antes de atacar se generan 60 s de tráfico legítimo (Portal, Mesa de ayuda, DNS y accesos denegados por R2).
+
+| Ataque | Detecta | Atacante bloqueado a los |
+|---|---|---|
+| Escaneo de puertos (nmap SYN, 101 puertos) | IDS, sid 1000001 | 0,8 s |
+| Barrido ICMP (40 hosts) | IDS, sid 1000002 | 1,1 s |
+| Escaneo de red TCP (nmap -sn -PS80, 64 hosts) | IDS, sid 1000003 | 0,8 s |
+| IP spoofing externo (198.51.100.7) | IDS, sid 1000004 | 0,3 s |
+| IP spoofing interno (misma subred) | Sensor del switch (T1) | 4,7 s |
+| Inyección SQL | IDS, sid 1000010 | 0,3 s |
+| Path traversal | IDS, sid 1000012 | 0,3 s |
+| Bot: 60 requests HTTP en ráfaga | IDS, sid 1000020 | 0,9 s |
+
+- **Tasa de detección:** 8/8. **Falsos positivos:** 0 en el tráfico legítimo. El testigo llegó a la Mesa de ayuda en todas las pruebas.
+- **Desglose del tiempo:** el agente reenvía la alerta en 26–109 ms (reloj del IDS), y ONOS acepta la regla T2 en ~140 ms (`MITIGACION_APLICADA`). El resto es la propia firma: los umbrales piden 10–40 eventos.
+- El spoofing interno es el más lento porque las estadísticas de flujos de ONOS se actualizan cada ~5 s.
+
+**Carga del IDS** (`pruebas/carga-ids.sh`): sesiones HTTP con inyección SQL desde un usuario, 20 s por tasa. El agente se detiene durante la prueba, para medir la capacidad de detección sin que el bloqueo corte las sesiones.
+
+| Sesiones maliciosas/s | Sesiones | Alertas | Detección | Paquetes capturados | Pérdidas del kernel | CPU de Suricata |
+|---|---|---|---|---|---|---|
+| 10 | 199 | 199 | 100 % | 2 057 | 0 | 1,3 % |
+| 25 | 499 | 499 | 100 % | 5 061 | 0 | 1,9 % |
+| 50 | 999 | 999 | 100 % | 10 056 | 0 | 2,9 % |
+| 100 | 1 999 | 1 999 | 100 % | 20 073 | 0 | 4,0 % |
+| 200 | 3 999 | 3 999 | 100 % | 40 115 | 0 | 6,4 % |
+| 400 | 7 999 | 7 999 | 100 % | 80 590 | 0 | 10,5 % |
+
+Con 400 sesiones/s (~4 000 paquetes/s) Suricata usa el 10,5 % de CPU de una VM de 2 vCPU, sin pérdidas. El límite de la prueba es el generador de una sola VM, no el IDS.
+
+**Escalabilidad:** la CPU crece de forma casi lineal (~2,4 % por cada 100 sesiones/s). Hay dos límites previsibles:
+- el ancho de banda del túnel GRE por la red de gestión;
+- el espejo de un solo puerto: con más puertos de acceso se agregan más espejos y, si hace falta, más hilos de AF_PACKET (`cluster_flow`).
+
+La mitigación cuesta **una regla T2 por atacante**, sin importar cuántos usuarios haya.
+
 **Pendiente de probar:** la caída física de DC-DIST, que en la topología es el único camino in-band hacia ONOS-1.
 
 ---
@@ -456,7 +529,7 @@ python3 r2/r2ctl.py validate   # también: plan, apply, verify, stats, rol, clea
 ## Hoja de ruta
 
 1. **Puertos de acceso adicionales** para probar varios supplicants simultáneos (hoy solo hay un puerto de usuarios).
-2. **R3:** Suricata con espejo en R-SW1 y mitigación por la API REST de ONOS.
+2. **R4:** detección de DDoS por consumo de ancho de banda y mitigación con meters de OpenFlow.
 3. **Prueba física de DF1:** apagar DC-DIST y comprobar que el control sigue por ONOS-2.
 
 ---

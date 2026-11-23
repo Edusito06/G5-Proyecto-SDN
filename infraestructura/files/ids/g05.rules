@@ -1,0 +1,29 @@
+# Reglas de R3 (G05): ataques encubiertos en la intranet, vistos en el espejo de R-SW1.
+# Variables en suricata.yaml: USUARIOS (subredes de rol), SERVIDORES (recursos e "Internet").
+# Los umbrales se eligieron para que el tráfico normal de la matriz de R2 no los dispare.
+
+# --- Escaneo de puertos: SYN de un mismo origen hacia puertos que ningún servidor ofrece
+# (los servicios del campus son 22, 53, 80 y 443). Un usuario legítimo no los toca, así
+# que una ráfaga hacia ellos es un escaneo y no un uso intensivo de los servicios.
+alert tcp $USUARIOS any -> $SERVIDORES ![22,53,80,443] (msg:"G05 R3 escaneo de puertos (SYN a puertos no ofrecidos)"; flags:S,12; detection_filter:track by_src, count 10, seconds 5; classtype:attempted-recon; sid:1000001; rev:2;)
+
+# --- Escaneo de red: barrido ICMP (ping sweep) desde un usuario
+alert icmp $USUARIOS any -> any any (msg:"G05 R3 escaneo de red (barrido ICMP)"; itype:8; detection_filter:track by_src, count 15, seconds 5; classtype:attempted-recon; sid:1000002; rev:1;)
+
+# --- Escaneo de red por TCP: conexiones a muchos destinos distintos (nmap -sn / -PS)
+alert tcp $USUARIOS any -> !$SERVIDORES any (msg:"G05 R3 escaneo de red (destinos fuera de los servicios)"; flags:S,12; detection_filter:track by_src, count 10, seconds 5; classtype:attempted-recon; sid:1000003; rev:1;)
+
+# --- IP spoofing: IP de origen que no pertenece a ninguna subred de usuarios ni de servicios
+alert ip ![$USUARIOS,$SERVIDORES,0.0.0.0/32] any -> any any (msg:"G05 R3 IP spoofing (origen fuera de las subredes del campus)"; threshold:type limit, track by_src, count 1, seconds 30; classtype:misc-activity; sid:1000004; rev:1;)
+
+# --- Requests maliciosos hacia los servidores (HTTP)
+# El path traversal se busca en la URI cruda: la normalizada ya resolvió los "../".
+alert http $USUARIOS any -> $SERVIDORES any (msg:"G05 R3 request malicioso: inyección SQL"; flow:to_server,established; http.uri; content:"union"; nocase; content:"select"; nocase; distance:0; classtype:web-application-attack; sid:1000010; rev:1;)
+alert http $USUARIOS any -> $SERVIDORES any (msg:"G05 R3 request malicioso: XSS"; flow:to_server,established; http.uri; content:"<script"; nocase; classtype:web-application-attack; sid:1000011; rev:1;)
+alert http $USUARIOS any -> $SERVIDORES any (msg:"G05 R3 request malicioso: path traversal"; flow:to_server,established; http.uri.raw; content:"../"; classtype:web-application-attack; sid:1000012; rev:2;)
+alert http $USUARIOS any -> $SERVIDORES any (msg:"G05 R3 request malicioso: herramienta de ataque"; flow:to_server,established; http.user_agent; pcre:"/(sqlmap|nikto|nmap|masscan|dirbuster|hydra)/i"; classtype:web-application-attack; sid:1000013; rev:1;)
+
+# --- Todos contra uno / bots: ráfaga de requests HTTP de un origen hacia un servidor
+alert http $USUARIOS any -> $SERVIDORES any (msg:"G05 R3 ráfaga de requests HTTP (bot)"; flow:to_server,established; http.method; content:"GET"; detection_filter:track by_src, count 40, seconds 10; classtype:attempted-dos; sid:1000020; rev:1;)
+# Inundación de conexiones (SYN) de un origen hacia un servicio
+alert tcp $USUARIOS any -> $SERVIDORES [80,443] (msg:"G05 R3 inundación de conexiones hacia un servicio"; flags:S,12; detection_filter:track by_src, count 100, seconds 10; classtype:attempted-dos; sid:1000021; rev:1;)

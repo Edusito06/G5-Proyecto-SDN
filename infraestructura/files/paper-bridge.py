@@ -86,7 +86,8 @@ def preflight(config, names):
         existing_ports = set(output(*OVS, "list-ports", BR).splitlines())
         # Los puertos internos L3 de g05-servicios (external_ids:g05-l3) son parte del diseño.
         service_ports = {p for p in existing_ports
-                         if ovs_get("Interface", p, "external_ids:g05-l3") == "true"}
+                         if ovs_get("Interface", p, "external_ids:g05-l3") == "true"
+                         or ovs_get("Interface", p, "external_ids:g05-espejo") == "true"}
         unknown = existing_ports - config["data_ports"].keys() - service_ports
         require(not unknown, f"br0 contiene puertos fuera del inventario físico: {sorted(unknown)}.")
         existing_target = output(*OVS, "get-controller", BR)

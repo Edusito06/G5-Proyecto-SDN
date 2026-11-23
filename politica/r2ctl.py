@@ -344,6 +344,15 @@ def compile_all(pol, topo, meters_by_dev, sessions=None):
                 R.append(rule(dev, 1, 50000,
                               [c_in(p), c_mac('ETH_SRC', m), c_eth(0x0806)],
                               [i_tbl(2)], f'T1 anti-spoofing ARP {h} (puerto+MAC)'))
+                # R3: IPv4 de este usuario con IP de origen ajena = spoofing. Se descarta
+                # y su contador es la señal que identity vigila (sensor en el switch).
+                R.append(rule(dev, 1, 45000,
+                              [c_in(p), c_mac('ETH_SRC', m), c_eth(0x0800)],
+                              [], f'T1 R3 spoofing detectado {h} (IP de origen ajena)'))
+                # R3: atacante bloqueado por el IDS o por spoofing (tabla de mitigación).
+                if u.get('bloqueado'):
+                    R.append(rule(dev, 2, 40000, [c_in(p), c_mac('ETH_SRC', m)], [],
+                                  f'T2 R3 bloqueo {h}: {u.get("motivo_bloqueo", "")}'[:120]))
                 R.append(rule(dev, 3, 35000, [c_in(p), c_mac('ETH_SRC', m)],
                               i_push(vid(u['rol'])) + [i_tbl(4)],
                               f'T3 identidad {h}: rol {u["rol"]} -> VLAN {vid(u["rol"])}'))

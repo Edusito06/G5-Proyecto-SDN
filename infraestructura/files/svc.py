@@ -13,17 +13,44 @@ import sys
 import threading
 
 
+def atender(c, banner):
+    """Si el cliente habla HTTP se lee su request y se responde como HTTP (así el
+    servidor confirma los datos y el IDS ve la transacción completa); si no envía nada
+    (nc -z, o un cliente que espera el banner) se responde solo con el banner."""
+    try:
+        c.settimeout(0.3)
+        try:
+            data = c.recv(4096)
+        except socket.timeout:
+            data = b''
+        if data[:8].split(b' ')[0] in (b'GET', b'POST', b'HEAD', b'PUT', b'DELETE', b'OPTIONS'):
+            c.settimeout(1)
+            while b'\r\n\r\n' not in data and len(data) < 65536:
+                more = c.recv(4096)
+                if not more:
+                    break
+                data += more
+            body = banner.encode()
+            c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n'
+                      b'Content-Length: ' + str(len(body)).encode() + b'\r\n\r\n' + body)
+        else:
+            c.sendall(banner.encode())
+        c.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    finally:
+        c.close()
+
+
 def tcp(name, ip, port):
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((ip, port))
-    s.listen(32)
+    s.listen(128)
+    banner = f'SRV {name} {ip}:{port}/tcp\n'
     while True:
         c, _ = s.accept()
-        try:
-            c.sendall(f'SRV {name} {ip}:{port}/tcp\n'.encode())
-        finally:
-            c.close()
+        threading.Thread(target=atender, args=(c, banner), daemon=True).start()
 
 
 def udp(name, ip, port):

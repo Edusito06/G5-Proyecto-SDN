@@ -22,6 +22,9 @@ API REST (puerto 5001):
   DELETE /identity/sessions/<mac>      fin de sesión
   POST   /identity/dhcp                Kea (ev, mac, ip)
   POST   /identity/aaa                 aaa-agent de cada nodo ONOS (ev, dev, port, mac)
+  POST   /identity/alert               R3: alerta de Suricata (src_ip, src_mac, firma, sid, ts)
+  POST   /identity/block/<mac>         R3: bloqueo manual (motivo, ttl); DELETE lo levanta
+  GET    /identity/blocks              R3: bloqueos vigentes
   GET    /identity/quarantine/<mac>    200 si está en cuarentena, 404 si no
   POST   /identity/quarantine/<mac>    pone en cuarentena (motivo, ttl)
   DELETE /identity/quarantine/<mac>    levanta la cuarentena (fuerza re-login)
@@ -45,6 +48,10 @@ STATE = os.getenv('R2_SESSIONS', '/var/lib/r2/sessions.json')
 RADIUS_IP = os.getenv('RADIUS_IP', '192.168.0.19')      # FreeRADIUS (red de gestión)
 KEA_IP = os.getenv('KEA_IP', '192.168.0.20')            # Kea (red de gestión)
 ONOS_IPS = set(os.getenv('ONOS_IPS', '192.168.0.16 192.168.0.17').split())  # agentes AAA
+IDS_IP = os.getenv('IDS_IP', '192.168.0.22')            # Suricata (agente de alertas, R3)
+BLOCK_TTL = int(os.getenv('BLOCK_TTL', '300'))           # s de bloqueo por alerta
+QUARANTINE_AFTER = 3                                     # alertas en 10 min -> cuarentena
+SPOOF_THRESHOLD = 5                                      # paquetes con IP ajena en 2 s
 SESSION_TTL = 3600           # = Session-Timeout de FreeRADIUS
 JOIN_WINDOW = 30             # s para unir la respuesta de RADIUS con AAA
 AAA_REST = 'http://127.0.0.1:8181/onos/aaa/app/users'
@@ -56,13 +63,43 @@ lock = threading.RLock()
 sessions = {}                # "sw/puerto/mac" -> vinculación
 quarantine = {}              # mac -> {motivo, expira}
 radius_q = []                # [(ts, usuario, vlan)] sin unir
+blocks = {}                  # mac -> {motivo, expira, desde} (R3: tabla 2)
+alert_hist = {}              # mac -> [ts de alertas] (reincidencia)
+mitigacion_pendiente = {}    # mac -> ts del bloqueo aún no aplicado en el switch
 dirty = threading.Event()
 busy = threading.Event()
+
+
+# Registro de incidentes (R3): los eventos de seguridad se guardan además, con fecha
+# completa, en un JSONL persistente que consulta GET /identity/incidents.
+INCIDENTES = os.environ.get('G05_INCIDENTES', '/var/log/g05/incidentes.jsonl')
+EV_INCIDENTE = {'ALERTA_IDS', 'ALERTA_SIN_ORIGEN', 'BLOQUEO', 'BLOQUEO_RENOVADO',
+                'MITIGACION_APLICADA', 'BLOQUEO_LEVANTADO', 'BLOQUEO_VENCIDO',
+                'CUARENTENA', 'CUARENTENA_VENCIDA', 'CUARENTENA_LEVANTADA'}
+inc_lock = threading.Lock()
 
 
 def log(ev, **kw):
     kw = {'t': time.strftime('%H:%M:%S'), 'ev': ev, **kw}
     print(json.dumps(kw, ensure_ascii=False), flush=True)
+    if ev in EV_INCIDENTE:
+        reg = {'fecha': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'ts': round(time.time(), 3), **kw}
+        try:
+            with inc_lock:
+                os.makedirs(os.path.dirname(INCIDENTES), exist_ok=True)
+                with open(INCIDENTES, 'a') as fh:
+                    fh.write(json.dumps(reg, ensure_ascii=False) + '\n')
+        except OSError:
+            pass
+
+
+def leer_incidentes(desde=0.0):
+    try:
+        with open(INCIDENTES) as fh:
+            regs = [json.loads(x) for x in fh if x.strip()]
+    except OSError:
+        return []
+    return [r for r in regs if r.get('ts', 0) >= desde]
 
 
 def skey(sw, port, mac):
@@ -95,9 +132,17 @@ def worker():
         try:
             with lock:
                 snap = [dict(s) for s in sessions.values()]
+                for x in snap:
+                    b = blocks.get(x['mac'])
+                    if b and b['expira'] > time.time():
+                        x['bloqueado'], x['motivo_bloqueo'] = True, b['motivo']
+                pend = dict(mitigacion_pendiente)
+                mitigacion_pendiente.clear()
             t0 = time.time()
             add, rem, _ = r2ctl.reconcile(pol, topo, snap)
             log('REGLAS', agregadas=add, retiradas=rem, ms=int((time.time() - t0) * 1000))
+            for m, tb in pend.items():                # bloqueo -> regla T2 aceptada por ONOS
+                log('MITIGACION_APLICADA', mac=m, ms=int((time.time() - tb) * 1000))
         except Exception as e:                       # noqa: BLE001
             log('ERROR_REGLAS', error=str(e)[:200])
             time.sleep(3)
@@ -118,6 +163,11 @@ def expiry():
                 if q['expira'] < now:
                     quarantine.pop(m)
                     log('CUARENTENA_VENCIDA', mac=m)
+            for m, b in list(blocks.items()):
+                if b['expira'] < now:
+                    blocks.pop(m)
+                    log('BLOQUEO_VENCIDO', mac=m, motivo=b['motivo'])
+                    push()
 
 
 def finalize(key, causa):
@@ -359,6 +409,83 @@ def do_guest(mac):
     return True
 
 
+# --------------------------------------------------------------------- R3
+def session_of(mac=None, ip=None):
+    with lock:
+        for s in sessions.values():
+            if (mac and s['mac'] == mac.lower()) or (ip and s.get('ip') == ip):
+                return s
+    return None
+
+
+def do_block(mac, motivo, ttl=BLOCK_TTL, t_alerta=None, fuente='ids', extra=None):
+    """Bloquea en T2 (descartar todo lo que envía esa MAC) y, si reincide, cuarentena."""
+    mac = mac.lower()
+    now = time.time()
+    with lock:
+        nuevo = mac not in blocks or blocks[mac]['expira'] < now
+        blocks[mac] = {'motivo': motivo, 'expira': now + int(ttl), 'desde': now}
+        hist = [t for t in alert_hist.get(mac, []) if now - t < 600] + [now]
+        alert_hist[mac] = hist
+        if nuevo:
+            mitigacion_pendiente[mac] = now
+        push()
+    s = session_of(mac=mac)
+    log('BLOQUEO' if nuevo else 'BLOQUEO_RENOVADO', mac=mac, usuario=s['usuario'] if s else None,
+        motivo=motivo, fuente=fuente, ttl=ttl, **(extra or {}))
+    if len(hist) >= QUARANTINE_AFTER and not quarantine.get(mac):
+        do_quarantine(mac, f'reincidencia R3: {motivo}', 600)
+
+
+def on_alert(b):
+    """Alerta de Suricata (agente del IDS): identifica al atacante y lo bloquea."""
+    s = session_of(mac=b.get('src_mac')) or session_of(ip=b.get('src_ip'))
+    mac = (s['mac'] if s else b.get('src_mac') or '').lower()
+    if not mac:
+        log('ALERTA_SIN_ORIGEN', firma=b.get('firma'), src_ip=b.get('src_ip'))
+        return False
+    log('ALERTA_IDS', firma=b.get('firma'), sid=b.get('sid'), src_ip=b.get('src_ip'),
+        mac=mac, usuario=s['usuario'] if s else None)
+    # Los relojes de las VMs no están sincronizados: el retardo del agente lo mide el IDS
+    # con su reloj; el resto (recepción -> reglas) lo mide identity con el suyo (REGLAS ms).
+    do_block(mac, f"sid {b.get('sid')} {b.get('firma', '')}"[:80],
+             extra={'retardo_agente_ms': b.get('retardo_agente_ms'), 'ts_alerta_ids': b.get('ts')})
+    return True
+
+
+spoof_prev = {}              # flow id -> paquetes de la regla T1 de spoofing
+spoof_gracia = {}            # mac -> hasta cuándo no se evalúa (tras levantar un bloqueo)
+SPOOF_GRACIA = 8             # s: las estadísticas de ONOS llegan con hasta ~5 s de retraso
+
+
+def watch_spoofing():
+    """Sensor en el switch: la regla T1 'IP de origen ajena' de cada usuario cuenta los
+    paquetes falsificados (que ya se descartan). Si sube de golpe, se bloquea la MAC."""
+    while True:
+        time.sleep(2)
+        try:
+            code, data = r2ctl.onos('GET', f'/flows/application/{r2ctl.APP}')
+            if code != 200:
+                continue
+            for f in data.get('flows', []):
+                if int(f['tableId']) != 1 or f['priority'] != 45000:
+                    continue
+                mac = next((c['mac'].lower() for c in f['selector']['criteria']
+                            if c['type'] == 'ETH_SRC'), None)
+                prev = spoof_prev.get(f['id'])
+                spoof_prev[f['id']] = f.get('packets', 0)
+                if mac and spoof_gracia.get(mac, 0) > time.time():
+                    continue                     # paquetes viejos del ataque ya levantado
+                if prev is not None and mac and f.get('packets', 0) - prev >= SPOOF_THRESHOLD:
+                    with lock:
+                        ya = mac in blocks and blocks[mac]['expira'] > time.time()
+                    if not ya:
+                        do_block(mac, f'IP spoofing ({f["packets"] - prev} paquetes en 2 s)',
+                                 fuente='switch')
+        except Exception as e:                           # noqa: BLE001
+            log('ERROR_SPOOFING', error=str(e)[:160])
+
+
 # --------------------------------------------------------------------- HTTP
 class H(BaseHTTPRequestHandler):
     def reply(self, code, body=None):
@@ -383,6 +510,8 @@ class H(BaseHTTPRequestHandler):
         if ip == RADIUS_IP and res == 'sessions' and method == 'POST' and not arg:
             return True
         if ip in ONOS_IPS and res == 'aaa' and method == 'POST':
+            return True
+        if ip == IDS_IP and res == 'alert' and method == 'POST':
             return True
         return ip == KEA_IP and res == 'dhcp' and method == 'POST'
 
@@ -416,6 +545,26 @@ class H(BaseHTTPRequestHandler):
         if res == 'aaa' and method == 'POST':
             on_aaa_event(b)
             return self.reply(200)
+        if res == 'alert' and method == 'POST':
+            return self.reply(200 if on_alert(b) else 202)
+        if res == 'block' and arg:
+            if method == 'POST':
+                do_block(arg, b.get('motivo', 'manual'), b.get('ttl', BLOCK_TTL), fuente='admin')
+                return self.reply(200)
+            if method == 'DELETE':
+                with lock:
+                    blocks.pop(arg.lower(), None)
+                    alert_hist.pop(arg.lower(), None)
+                    spoof_gracia[arg.lower()] = time.time() + SPOOF_GRACIA
+                    push()
+                log('BLOQUEO_LEVANTADO', mac=arg.lower())
+                return self.reply(200)
+        if res == 'incidents' and method == 'GET':
+            q = dict(x.split('=', 1) for x in self.path.partition('?')[2].split('&') if '=' in x)
+            return self.reply(200, leer_incidentes(float(q.get('desde', 0) or 0)))
+        if res == 'blocks' and method == 'GET':
+            with lock:
+                return self.reply(200, {m: b for m, b in blocks.items() if b['expira'] > time.time()})
         if res == 'dhcp' and method == 'POST':
             ok = on_dhcp(b.get('ev', 'add'), b.get('mac', ''), b.get('ip', ''))
             return self.reply(200 if ok else 202)
@@ -448,7 +597,7 @@ def main():
     except (OSError, ValueError):
         pass
     log('ARRANQUE', sesiones=len(sessions))
-    for fn in (worker, expiry, watch_logoff, sync_with_aaa):
+    for fn in (worker, expiry, watch_logoff, sync_with_aaa, watch_spoofing):
         threading.Thread(target=fn, daemon=True).start()
     push()
     ThreadingHTTPServer(('0.0.0.0', 5001), H).serve_forever()
