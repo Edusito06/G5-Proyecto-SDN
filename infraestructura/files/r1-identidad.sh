@@ -1,12 +1,14 @@
 #!/bin/bash
 # R1 (G05): OpenLDAP con ppolicy + FreeRADIUS con EAP-TLS en la VM LDAP/RADIUS.
-# Se ejecuta en la VM (con sudo). Las contraseñas y claves se generan aquí, en
+# Se ejecuta en la VM (con sudo), con g05-bloqueo.py copiado en /tmp/r1/. Las contraseñas y claves se generan aquí, en
 # /root/g05-r1 (solo root), y nunca se versionan.
 #
 # - Usuarios de prueba y su grupo de red (rol):  admin01 net-admin (5),
 #   adm01 net-administrativo (4), doc01 net-docente (3), alu01 net-alumno (2),
-#   sing01 sin grupo (debe ser rechazado).
-# - ppolicy: bloqueo tras 5 intentos fallidos (15 min).
+#   sing01 sin grupo (debe ser rechazado), multi01 en net-docente y net-admin (multirol:
+#   gana el rol de más privilegio) y prueba01 net-alumno (solo para la prueba de bloqueo).
+# - ppolicy: bloqueo tras 5 intentos fallidos (15 min). Con EAP-TLS no hay contraseña:
+#   el bloqueo lo aplica g05-bloqueo con los rechazos de FreeRADIUS (pwdAccountLockedTime).
 # - FreeRADIUS: EAP-TLS (la app AAA de ONOS solo maneja EAP-MD5 y EAP-TLS); el
 #   rol sale del grupo de LDAP como Tunnel-Private-Group-Id = VLAN (rol x 100) y
 #   se entrega al servicio identity por REST.
@@ -20,7 +22,9 @@ C=/root/g05-r1
 sudo install -d -m 700 $C
 gen() { sudo test -s $C/$1 || sudo sh -c "head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c ${2:-20} > $C/$1; chmod 600 $C/$1"; }
 gen ldap_admin; gen ldap_radius; gen radius_secret 24
-declare -A USUARIOS=([admin01]=net-admin [adm01]=net-administrativo [doc01]=net-docente [alu01]=net-alumno [sing01]=)
+# Grupos de red de cada usuario (varios separados por coma: multirol).
+declare -A USUARIOS=([admin01]=net-admin [adm01]=net-administrativo [doc01]=net-docente [alu01]=net-alumno [sing01]=
+                     [multi01]=net-docente,net-admin [prueba01]=net-alumno)
 for u in "${!USUARIOS[@]}"; do gen "user_$u" 14; done
 ADMIN_PW_FILE=$C/ldap_admin
 
@@ -84,7 +88,7 @@ EOF
 done
 for g in net-admin net-administrativo net-docente net-alumno; do
   members=""
-  for u in "${!USUARIOS[@]}"; do [ "${USUARIOS[$u]}" = "$g" ] && members+="member: uid=$u,ou=people,$BASE"$'\n'; done
+  for u in "${!USUARIOS[@]}"; do [[ ",${USUARIOS[$u]}," == *",$g,"* ]] && members+="member: uid=$u,ou=people,$BASE"$'\n'; done
   ladd <<EOF
 dn: cn=$g,ou=groups,$BASE
 objectClass: groupOfNames
@@ -259,14 +263,12 @@ server default {
     authorize {
         filter_username
         preprocess
-        # El usuario debe existir en LDAP y no estar bloqueado por ppolicy.
+        # LDAP carga la cuenta y sus grupos. Que exista y no esté bloqueada se decide en
+        # post-auth, después del EAP: así una cuenta inexistente o bloqueada recibe el mismo
+        # intercambio y el mismo rechazo que un certificado inválido (no se puede enumerar).
         ldap
         if (notfound) {
-            update request { &Module-Failure-Message := "usuario inexistente en LDAP" }
-            reject
-        }
-        if (&control:Tmp-String-0) {
-            reject
+            update control { &Tmp-String-1 := "usuario inexistente en LDAP" }
         }
         eap {
             ok = return
@@ -276,7 +278,15 @@ server default {
         eap
     }
     post-auth {
-        # Precedencia de roles: gana el de mayor privilegio.
+        if (&control:Tmp-String-1) {
+            update request { &Module-Failure-Message := "%{control:Tmp-String-1}" }
+            reject
+        }
+        if (&control:Tmp-String-0) {                # pwdAccountLockedTime (R1-03)
+            update request { &Module-Failure-Message := "cuenta bloqueada por intentos fallidos" }
+            reject
+        }
+        # Precedencia de roles (multirol): gana el de mayor privilegio.
         if (&LDAP-Group == "net-admin") {
             update reply { &Tunnel-Private-Group-Id := "500" }
         }
@@ -300,12 +310,31 @@ server default {
             &Termination-Action := RADIUS-Request
         }
         rest
+        g05_intentos
         Post-Auth-Type REJECT {
             attr_filter.access_reject
+            eap                             # EAP-Failure también en los rechazos tempranos
+            g05_intentos
         }
     }
 }
 EOF
+
+# R1-03: cada respuesta final (aceptada o rechazada) a un archivo que lee g05-bloqueo.
+# El usuario va en hexadecimal: un User-Name con saltos de línea no fabrica líneas.
+sudo tee $R/mods-available/g05_intentos >/dev/null <<'EOF'
+linelog g05_intentos {
+    filename = ${logdir}/g05-intentos.log
+    permissions = 0640
+    reference = "messages.%{%{reply:Packet-Type}:-default}"
+    messages {
+        Access-Accept = "ACEPTA %{hex:User-Name}"
+        Access-Reject = "RECHAZO %{hex:User-Name}"
+        default = "OTRO %{hex:User-Name}"
+    }
+}
+EOF
+sudo ln -sf $R/mods-available/g05_intentos $R/mods-enabled/g05_intentos
 
 sudo tee $R/mods-available/rest >/dev/null <<EOF
 rest {
@@ -342,8 +371,26 @@ sudo sed -i 's/^\(\s*\)auth = no/\1auth = yes/' $R/radiusd.conf
 sudo freeradius -C >/tmp/frc.log 2>&1 || { tail -15 /tmp/frc.log; exit 1; }
 sudo systemctl enable freeradius slapd >/dev/null 2>&1
 sudo systemctl restart freeradius
+
+# Bloqueo por intentos fallidos (R1-03): 5 rechazos en 15 min -> cuenta bloqueada 15 min.
+sudo install -D -m 755 /tmp/r1/g05-bloqueo.py /usr/local/sbin/g05-bloqueo
+sudo tee /etc/systemd/system/g05-bloqueo.service >/dev/null <<EOF
+[Unit]
+Description=Bloqueo de cuentas por intentos fallidos (R1-03 G05)
+After=freeradius.service slapd.service
+[Service]
+ExecStart=/usr/local/sbin/g05-bloqueo servir
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1 IDENTITY_URL=$IDENTITY_URL LDAP_BASE=$BASE
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now g05-bloqueo >/dev/null 2>&1
+sudo systemctl restart g05-bloqueo
 sleep 2
-echo "slapd: $(systemctl is-active slapd)  freeradius: $(systemctl is-active freeradius)"
+echo "slapd: $(systemctl is-active slapd)  freeradius: $(systemctl is-active freeradius)  bloqueo: $(systemctl is-active g05-bloqueo)"
 echo "usuarios LDAP: $(sudo ldapsearch -x -LLL -H ldap://localhost -D cn=admin,$BASE -y $ADMIN_PW_FILE -b ou=people,$BASE uid | grep -c '^uid:')"
 echo "grupos: $(sudo ldapsearch -x -LLL -H ldap://localhost -D cn=admin,$BASE -y $ADMIN_PW_FILE -b ou=groups,$BASE cn | grep '^cn:' | tr '\n' ' ')"
 echo "certificados de usuario: $(sudo sh -c "ls $D/clientes/*.pem" | wc -l)"

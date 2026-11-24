@@ -119,6 +119,13 @@ El rol viaja como VLAN = rol × 100. **R-SW1** aplica la política con el pipeli
 
 Core-1 enruta entre las VLAN de rol y los segmentos de servicios (`g02` LDAP/RADIUS, `g11` DNS/DHCP, `srv` Recursos). Su firewall (`g05-core1-router.nft`) descarta todo intento de llegar a la gestión, al plano de control, al propio Core-1 o a otro usuario.
 
+**Decisión y precedencia:**
+- **`r2ctl.evaluate_access(pol, rol, recurso[, proto, puerto])`** devuelve `('PERMIT'|'DENY', motivo)` desde `policy.yaml`. Todo rol o recurso no registrado se deniega por defecto.
+- **`deniega: [G..]`** en un rol compila a reglas de descarte en T4 con prioridad 29950, por encima de cualquier permiso del rol, incluido el permiso total del admin (29900). Cuando PERMIT y DENY coinciden sobre el mismo tráfico, gana DENY.
+- **Cambiar la política:** se edita `policy.yaml` y se aplica con `r2ctl apply` (o lo reconcilia identity).
+
+**Registro de accesos:** los accesos permitidos también se registran, como `ACCESO_PERMITIDO` con usuario, rol, MAC y destino. Vienen de las firmas sid 25xxxxx, generadas también desde `policy.yaml`, y se consultan con `GET /identity/accesos`.
+
 **Trazabilidad de intentos:**
 - **Qué se registra:** cada intento contra un recurso que el rol no tiene permitido, con usuario 802.1X, rol, MAC, destino y motivo. Va a `INTENTO_DENEGADO` en el registro de seguridad (`/var/log/g05/incidentes.jsonl`) y se resume por usuario y destino en `GET /identity/intentos`.
 - **Por qué con el IDS:** atribuirlo con contadores del switch costaría una regla por usuario y recurso. En cambio, el switch descarta el intento y el IDS, que ya ve el puerto de usuarios por el espejo de R3, lo reporta.
@@ -186,6 +193,15 @@ Las claves y certificados de prueba se generan en la VM ldap-radius (`/root/g05-
 - **CN = identidad:** `check_cert_cn` impide presentar un certificado propio con la identidad de otro.
 - **Revocación por CRL:** `check_crl`, con `sudo g05-revocar <cert.pem>` en ldap-radius.
 - **Registro:** FreeRADIUS guarda cada intento en `radius.log` (`Login OK` / `Login incorrect (motivo)`). identity guarda los rechazos (`SESION_RECHAZADA`, `DHCP_SIN_SESION`, `ACCESO_DENEGADO`) en `/var/log/g05/incidentes.jsonl`.
+- **Rechazo uniforme:** que la cuenta exista y no esté bloqueada se comprueba en `post-auth`, después del EAP. `Post-Auth-Type REJECT` incluye `eap`. Así un usuario inexistente, una inyección (`' OR '1'='1`, `*`) o un certificado inválido reciben el mismo Access-Reject (EAP-Failure + Message-Authenticator), y no se pueden enumerar cuentas. El motivo real solo queda en `radius.log`.
+- **Bloqueo por intentos fallidos (R1-03):**
+  - **Política:** 5 rechazos seguidos en 15 min bloquean la cuenta 15 min, la misma de la `ppolicy` de LDAP.
+  - **Cómo se registra el rechazo:** con EAP-TLS no hay contraseña, así que FreeRADIUS escribe cada respuesta en `g05-intentos.log` (`linelog`). El usuario va en hexadecimal, para que un nombre con saltos de línea no fabrique líneas.
+  - **Cómo se bloquea:** `g05-bloqueo` (en ldap-radius) aplica la política y escribe `pwdAccountLockedTime` en LDAP. Con eso la cuenta se rechaza incluso con su certificado.
+  - **Desbloqueo:** el servicio quita el bloqueo al vencer. Un acceso correcto reinicia el contador.
+  - **Registro:** cada fallo, bloqueo y desbloqueo se avisa a identity (`INTENTO_FALLIDO`, `CUENTA_BLOQUEADA`, `CUENTA_DESBLOQUEADA`).
+  - **Comandos:** `sudo g05-bloqueo estado` y `sudo g05-bloqueo desbloquear <usuario>`, este último con el servicio detenido.
+- **Multirol:** un usuario puede estar en varios grupos de LDAP. Gana el de mayor privilegio (admin > administrativo > docente > alumno). Ejemplo: `multi01`, docente y admin, recibe la VLAN 500.
 
 ### R3: detección y mitigación de ataques encubiertos
 
@@ -281,7 +297,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 | Redundancia del canal de control (BFD + Fast Failover) | ✅ Probada ante caídas de enlace y de Core-1 |
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
 | **R2** política por rol en R-SW1 | ✅ 216 pruebas, 0 discrepancias; 142/142 bloqueados; trazabilidad 53/53 con usuario; 200 sesiones con 1 503 reglas y 30 sesiones/s en ráfaga |
-| **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real (216 pruebas, 0 discrepancias); 21/21 accesos inválidos bloqueados; EAP-TLS en 82 ms; ~33 auth/s |
+| **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real (216 pruebas, 0 discrepancias); 21/21 accesos inválidos bloqueados; bloqueo al 5.º fallo; multirol; EAP-TLS en 82 ms; ~33 auth/s |
 | **R4** DDoS por ancho de banda + meter por fuente | ✅ Una fuente y ataque distribuido: fuentes identificadas en ~14 s, la víctima pasa de 75–125 a 2–6 Mbit/s, el testigo nunca se limita, 0 falsos positivos |
 | **R3** IDS Suricata + mitigación por ONOS | ✅ 8/8 ataques detectados y mitigados en 0,3–4,7 s, 0 falsos positivos, el testigo nunca se afecta |
 
@@ -316,6 +332,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   │   ├── g05-core1-router.nft  Firewall de Core-1 como router
 │   │   ├── servidores.sh, svc.py IPs por recurso, ruta de vuelta y servicios de prueba
 │   │   ├── r1-identidad.sh       OpenLDAP + FreeRADIUS (EAP-TLS) + PKI de prueba
+│   │   ├── g05-bloqueo.py        R1-03: bloqueo de cuentas por intentos fallidos (ldap-radius)
 │   │   ├── kea-dhcp4.conf, g05-kea-hook.sh  Subred por rol y aviso de concesiones a identity
 │   │   ├── cluster/              Plantillas Atomix/ONOS y scripts de arranque y configuración
 │   │   ├── ids/                  R3: firmas, Suricata, agente y espejo GRE; g05-r2.rules (trazabilidad R2, generadas)
@@ -324,7 +341,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── templates/                Plantilla del perfil estático anterior
 │   └── evidencia/                Evidencia JSON generada en el slice
 ├── pruebas/
-│   ├── unitarias/                pytest sin red: r2ctl, identity, R4 y g05-redundancia (81 pruebas)
+│   ├── unitarias/                pytest: r2ctl, identity, R4, redundancia y las 12 del Lab 7 (124 pruebas)
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
 │   ├── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
 │   ├── prueba-r1.sh              R1: accesos inválidos, latencia de autenticación y auth/s
@@ -479,7 +496,7 @@ Corren en segundos, sin el slice ni la red: importan el código y lo ejercitan c
 
 ```bash
 python3 -m pip install pytest pyyaml
-python3 -m pytest pruebas/unitarias -q        # 81 passed
+python3 -m pytest pruebas/unitarias -q        # 124 passed (113 sin red + 11 en el slice)
 ```
 
 | Suite | Pruebas | Qué comprueba |
@@ -488,6 +505,33 @@ python3 -m pytest pruebas/unitarias -q        # 81 passed
 | `test_identity.py` | 27 | R1: unión RADIUS + AAA y rechazo si falta RADIUS, es de otro usuario, venció o trae una VLAN inexistente. DHCP solo dentro de la subred del rol, reautenticación, cambio de rol y de puerto, persistencia. R3: bloqueo por alerta, cuarentena a la tercera, alerta sin origen. R2: intento denegado registrado sin bloquear. API: qué origen puede llamar a qué (11 casos) |
 | `test_ddos.py` | 12 | R4: tráfico normal y picos aislados no disparan; una descarga a 1,3 Gbit/s (55 000 ACK/s) no es fuente; flood volumétrico por bit/s y por paquetes/s; ataque distribuido bajo el umbral individual; levantamiento solo tras enfriar; lecturas repetidas de ONOS y contadores reiniciados; regla T2 con meter que conserva la política; R3 gana a R4; lectura de contadores de ONOS |
 | `test_redundancia.py` | 25 | Un simulador del control in-band sigue el TCP/6653 de los 6 switches hacia **ONOS-1 y ONOS-2, ida y vuelta**, con los grupos Fast Failover. Se prueba sin fallas, con **cada uno de los 9 enlaces caído** y con **Core-1 caído** |
+
+
+**Pruebas obligatorias del Lab 7** (`test_lab7.py` sin red y `test_lab7_slice.py` en el slice).
+- **Mapeo:** las funciones del informe previo son referenciales; cada código se mapea a la función real.
+- **Pruebas del slice:** prueban cada módulo real aislado. FreeRADIUS con `eapol_test`, sin AAA ni ONOS; Suricata con `suricata -r` sobre capturas sintéticas (`pcap.py`).
+- **Sin canal SSH:** si los canales no responden, las pruebas del slice se omiten.
+
+| Código | Caso X.Y.Z | Función real | Qué se comprueba |
+|---|---|---|---|
+| R1-01 | 1.1.1 | FreeRADIUS (EAP-TLS + LDAP) e `identity.on_approved` | Los 4 roles reciben Access-Accept con su VLAN; identity devuelve usuario y rol |
+| R1-02 | 1.1.2 | FreeRADIUS, `g05-bloqueo.USUARIO_OK` / `leer_linea` | 10 intentos inválidos (certificado de otro, usuario inexistente, CA ajena, caducado, revocado, vacío, `' OR '1'='1`, `*`, inyección de filtro LDAP, sin grupo) reciben el mismo Access-Reject, sin VLAN ni Reply-Message; las entradas maliciosas no cuentan ni reinician cuentas |
+| Multirol | 1.1.3 | `post-auth` de FreeRADIUS | `multi01` (docente + admin) recibe la VLAN 500 |
+| R1-03 | 1.2.1–1.2.3 | `g05-bloqueo.register_failed_attempt` / `is_locked` | Con 4 fallos sigue habilitada y al 5.º se bloquea; bloqueada rechaza su propio certificado; vence a los 900 s; ventana y aciertos reinician. En el slice, prueba01 queda bloqueado en LDAP |
+| R2-01 | 2.1.1–2.1.2 | `r2ctl.evaluate_access` | Admin PERMIT y docente DENY sobre G04 (crítico), con motivo; servicio no ofrecido DENY |
+| R2-02 | 2.1.3–2.1.4 | `r2ctl.evaluate_access` / `allowed` | Rol o recurso no registrado (`'Invitado'`, 99, `None`, `consola_inexistente`): DENY por defecto, sin excepciones |
+| R2-03 | 2.2.1–2.2.3 | `r2ctl.compile_all` (T4) | PERMIT y DENY sobre G07: el descarte tiene prioridad mayor y el simulador lo confirma; DENY también gana al permiso total; las 216 combinaciones coinciden con la decisión |
+| R2 (logs) | 2.3.1 | `identity.on_acceso` / `on_intento` | Accesos permitidos y denegados registrados con usuario, sin bloquear |
+| R3-01 | 3.1.1–3.1.2 | Firma sid 1000001 (Suricata) | 10 SYN a puertos no ofrecidos: sin alerta; 11: alerta con origen y destino. 15 conexiones a 22/53/80/443: sin alerta (falso positivo) |
+| R3-02 | 3.1.3 | Firmas 1000002 / 1000003 | Barrido ICMP: 15 hosts sin alerta, 16 con alerta; 11 hosts por TCP: alerta; identifica el origen |
+| R3-03 | 3.1.3 | Reglas T1 (puerto + MAC + IP) y `identity.watch_spoofing` | El paquete legítimo pasa y el de IP ajena se descarta y cuenta; sobre el umbral (3 en 2 s) se bloquea |
+| R3-04 | 3.1.4 | Firma 1000020 | 40 GET en 8 s: sin alerta; 41: alerta; dos clientes contra el mismo servidor, ambos identificados |
+| R3-05 | 3.2.1–3.2.2 | `r2ctl.compile_all` (T2) e `identity.vencer` | Regla de descarte (prioridad 40000) exacta para la MAC del atacante; el vecino del mismo puerto sigue pasando; el bloqueo vence a los 300 s y la regla se retira |
+| R3-06 | 3.3.1 | `identity.log` (`incidentes.jsonl`) | El incidente tiene fecha ISO-8601, firma, origen, destino, usuario y acción (`REGLA_T2_DROP`, TTL) |
+
+**Lo que encontró R1-02:** antes del cambio, un usuario inexistente se rechazaba sin `EAP-Message`, y un certificado inválido con él. Eso permitía saber si una cuenta existe. Se corrigió en FreeRADIUS (ver "Rechazo uniforme").
+
+**Umbrales medidos de Suricata:** `detection_filter` alerta en la coincidencia N+1. Por ejemplo, `count 10` alerta en la 11.ª.
 
 Las pruebas detectan errores reales:
 - **Mutación:** si se agrega a mano en las reglas compiladas un permiso del alumno hacia Notas, la matriz simulada marca 3 discrepancias.

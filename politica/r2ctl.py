@@ -191,6 +191,12 @@ def tabla4(dev, pol, roles_present, meters, pop=True):
         R.append(rule(dev, 4, 29800, [c_vlan(v), c_eth(0x0806)],
                       ok,
                       f'T4 ARP {nombre} (inundación validada; sin proxy ARP)'))
+        # Denegación explícita: por encima de todo permiso del rol (incluido el total,
+        # 29900), así que cuando PERMIT y DENY coinciden sobre el mismo tráfico gana DENY.
+        for g in r.get('deniega', []):
+            R.append(rule(dev, 4, 29950,
+                          [c_vlan(v), c_eth(0x0800), c_dst(pol['recursos'][g]['prefijo'])], [],
+                          f'T4 deniega {nombre} -> {g} {pol["recursos"][g]["nombre"]} (explícito)'))
         if r['permite'] == 'todo':
             R.append(rule(dev, 4, 29900, [c_vlan(v)], ok,
                           f'T4 permiso total {nombre}'))
@@ -442,6 +448,9 @@ def validate(pol, topo, quiet=False):
             for g in r['permite']:
                 if g not in rec:
                     err.append(f'rol {rol} ({r["nombre"]}): grupo {g} no existe')
+        for g in r.get('deniega', []):
+            if g not in rec:
+                err.append(f'rol {rol} ({r["nombre"]}): deniega {g}, que no existe')
     for h, u in topo['usuarios'].items():
         if u['rol'] not in pol['roles']:
             err.append(f'{h}: rol {u["rol"]} no existe')
@@ -654,19 +663,52 @@ def cmd_stats(pol, topo):
 
 
 # -------------------------------------------------------------------- verify
+def recurso_de_ip(pol, ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    return next((g for g, rec in pol['recursos'].items() if a in net(rec['prefijo'])), None)
+
+
+def evaluate_access(pol, rol, recurso, proto=None, port=None):
+    """Decisión de R2 desde policy.yaml, sin mirar las reglas compiladas.
+
+    rol: número de rol; recurso: id del inventario (G01..G12); proto/port: servicio
+    opcional. Devuelve (decisión, motivo) con decisión 'PERMIT' o 'DENY'. Todo rol o
+    recurso no registrado se deniega por defecto, y una denegación explícita del rol
+    (`deniega`) prevalece sobre cualquier permiso, incluido el permiso total."""
+    try:
+        r = pol['roles'][int(rol)]
+    except (KeyError, TypeError, ValueError):
+        return 'DENY', f'rol {rol!r} no registrado: denegado por defecto'
+    rec = pol['recursos'].get(recurso)
+    if rec is None:
+        return 'DENY', f'recurso {recurso!r} no registrado en el inventario: denegado por defecto'
+    n, desc = r['nombre'], f'{recurso} {rec["nombre"]} (nivel {rec["nivel"]})'
+    if recurso in r.get('deniega', []):
+        return 'DENY', f'rol {n}: denegación explícita sobre {desc}, prevalece sobre el permiso'
+    if r['permite'] == 'todo':
+        return 'PERMIT', f'rol {n}: permiso total, incluye {desc}'
+    if recurso not in r['permite']:
+        return 'DENY', f'rol {n} sin permiso sobre {desc}'
+    svcs = rec.get('servicios')
+    if svcs and proto is not None and f'{proto}/{port}' not in svcs:
+        return 'DENY', f'rol {n}: {desc} no ofrece {proto}/{port} (ofrece {", ".join(svcs)})'
+    return 'PERMIT', f'rol {n} autorizado para {desc}'
+
+
 def allowed(pol, rol, ip, proto, port):
-    """Oráculo: decide desde la política, sin mirar las reglas compiladas."""
-    r = pol['roles'][rol]
+    """Oráculo de verify: decide desde la política, sin mirar las reglas compiladas."""
+    g = recurso_de_ip(pol, ip)
+    if g:
+        return evaluate_access(pol, rol, g, proto, port)[0] == 'PERMIT'
+    r = pol['roles'].get(rol)
+    if r is None:
+        return False
     if r['permite'] == 'todo':
         return True
-    a = ipaddress.ip_address(ip)
-    for g, rec in pol['recursos'].items():
-        if a in net(rec['prefijo']):
-            if g not in r['permite']:
-                return False
-            svcs = rec.get('servicios')
-            return (not svcs) or f'{proto}/{port}' in svcs
-    if any(a in net(p) for p in pol['bloques_privados']):
+    if any(ipaddress.ip_address(ip) in net(p) for p in pol['bloques_privados']):
         return False
     return bool(r.get('internet'))
 
@@ -903,7 +945,8 @@ def cmd_apply_quiet(pol, topo):
 
 
 # ------------------------------------------------------------ trazabilidad (IDS)
-SID_R2 = 2000000
+SID_R2 = 2000000            # intentos denegados: 2000000-2499999
+SID_R2_OK = 2500000         # accesos permitidos: 2500000-2999999
 
 
 def subred_rol(rol):
@@ -926,6 +969,7 @@ def ids_reglas(pol):
         sub, n = f'[{subred_rol(rol)},!{gw}]', r['nombre']     # el router del rol no es un usuario
         sid = SID_R2 + int(rol) * 1000
         perm = set(pol['recursos']) if r['permite'] == 'todo' else set(r['permite'])
+        perm -= set(r.get('deniega', []))
 
         def regla(proto, dst, puertos, extra, msg):
             nonlocal sid
@@ -955,6 +999,30 @@ def ids_reglas(pol):
             regla('ip', f'![{fuera}]', 'any', '', f'{n} -> Internet')
         otros = [subred_rol(o) for o in sorted(pol['roles']) if o != rol]
         regla('ip', '[' + ','.join(otros) + ']', 'any', '', f'{n} -> otros usuarios')
+    # Registro de accesos permitidos (sid 25xxxxx): una línea por par usuario-recurso
+    # cada 60 s, con el inicio de la conexión (SYN) o la consulta UDP.
+    out.append('# Accesos permitidos (registro de accesos a recursos)')
+    for rol, r in sorted(pol['roles'].items()):
+        gw = subred_rol(rol).replace('.0/24', '.1')
+        sub = f'[{subred_rol(rol)},!{gw}]'
+        sid = SID_R2_OK + int(rol) * 1000
+        perm = set(pol['recursos']) if r['permite'] == 'todo' else set(r['permite'])
+        for g in sorted(perm - set(r.get('deniega', []))):
+            rec = pol['recursos'][g]
+            svcs = [] if r['permite'] == 'todo' else (rec.get('servicios') or [])
+            tcp = sorted({pt for pr, pt in map(parse_svc, svcs) if pr == 'tcp'})
+            udp = sorted({pt for pr, pt in map(parse_svc, svcs) if pr == 'udp'})
+            lista = lambda ps: ('[' + ','.join(map(str, ps)) + ']') if ps else 'any'
+            protos = []
+            if tcp or not svcs:
+                protos.append(('tcp', lista(tcp), 'flags:S,12; '))
+            if udp or not svcs:
+                protos.append(('udp', lista(udp), ''))
+            for proto, puertos, extra in protos:
+                sid += 1
+                out.append(f'alert {proto} {sub} any -> {rec["prefijo"]} {puertos} (msg:"G05 R2 acceso '
+                           f'permitido: {r["nombre"]} -> {g} {rec["nombre"]}"; {extra}{lim} '
+                           f'classtype:not-suspicious; metadata:g05 r2, rol {r["nombre"]}; sid:{sid}; rev:1;)')
     return '\n'.join(out) + '\n'
 
 

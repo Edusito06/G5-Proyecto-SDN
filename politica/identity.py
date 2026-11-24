@@ -52,7 +52,7 @@ ONOS_IPS = set(os.getenv('ONOS_IPS', '192.168.0.16 192.168.0.17').split())  # ag
 IDS_IP = os.getenv('IDS_IP', '192.168.0.22')            # Suricata (agente de alertas, R3)
 BLOCK_TTL = int(os.getenv('BLOCK_TTL', '300'))           # s de bloqueo por alerta
 QUARANTINE_AFTER = 3                                     # alertas en 10 min -> cuarentena
-SPOOF_THRESHOLD = 5                                      # paquetes con IP ajena en 2 s
+SPOOF_THRESHOLD = 3                                      # paquetes con IP ajena en 2 s
 SESSION_TTL = 3600           # = Session-Timeout de FreeRADIUS
 JOIN_WINDOW = 30             # s para unir la respuesta de RADIUS con AAA
 AAA_REST = 'http://127.0.0.1:8181/onos/aaa/app/users'
@@ -79,8 +79,10 @@ EV_INCIDENTE = {'ALERTA_IDS', 'ALERTA_SIN_ORIGEN', 'BLOQUEO', 'BLOQUEO_RENOVADO'
                 'CUARENTENA', 'CUARENTENA_VENCIDA', 'CUARENTENA_LEVANTADA',
                 # R1: intentos fallidos (802.1X rechazado, DHCP o acceso sin sesión)
                 'SESION_RECHAZADA', 'ACCESO_DENEGADO', 'DHCP_SIN_SESION',
-                # R2: intentos contra recursos que la política del rol no permite
-                'INTENTO_DENEGADO',
+                # R2: accesos a recursos, permitidos y denegados por la política del rol
+                'INTENTO_DENEGADO', 'ACCESO_PERMITIDO',
+                # R1: cuentas bloqueadas por intentos fallidos (FreeRADIUS + LDAP)
+                'CUENTA_BLOQUEADA', 'CUENTA_DESBLOQUEADA', 'INTENTO_FALLIDO',
                 # R4: fuentes de DDoS limitadas con meter
                 'DDOS_DETECTADO', 'LIMITE_LEVANTADO'}
 inc_lock = threading.Lock()
@@ -161,23 +163,28 @@ def worker():
             busy.clear()
 
 
+def vencer(now):
+    """Retira lo que expiró: sesiones (reautenticación), cuarentenas y bloqueos de R3."""
+    with lock:
+        for k, s in list(sessions.items()):
+            if s['expira'] < now:
+                finalize(k, 'REAUTENTICACION_VENCIDA')
+        for m, q in list(quarantine.items()):
+            if q['expira'] < now:
+                quarantine.pop(m)
+                log('CUARENTENA_VENCIDA', mac=m)
+        for m, b in list(blocks.items()):
+            if b['expira'] < now:
+                blocks.pop(m)
+                log('BLOQUEO_VENCIDO', mac=m, motivo=b['motivo'], accion='REGLA_T2_RETIRADA',
+                    duracion_s=round(now - b['desde'], 1))
+                push()
+
+
 def expiry():
     while True:
         time.sleep(5)
-        now = time.time()
-        with lock:
-            for k, s in list(sessions.items()):
-                if s['expira'] < now:
-                    finalize(k, 'REAUTENTICACION_VENCIDA')
-            for m, q in list(quarantine.items()):
-                if q['expira'] < now:
-                    quarantine.pop(m)
-                    log('CUARENTENA_VENCIDA', mac=m)
-            for m, b in list(blocks.items()):
-                if b['expira'] < now:
-                    blocks.pop(m)
-                    log('BLOQUEO_VENCIDO', mac=m, motivo=b['motivo'])
-                    push()
+        vencer(time.time())
 
 
 def finalize(key, causa):
@@ -428,7 +435,7 @@ def session_of(mac=None, ip=None):
     return None
 
 
-def do_block(mac, motivo, ttl=BLOCK_TTL, t_alerta=None, fuente='ids', extra=None):
+def do_block(mac, motivo, ttl=BLOCK_TTL, t_alerta=None, fuente='ids', extra=None, dst=None):
     """Bloquea en T2 (descartar todo lo que envía esa MAC) y, si reincide, cuarentena."""
     mac = mac.lower()
     now = time.time()
@@ -442,7 +449,8 @@ def do_block(mac, motivo, ttl=BLOCK_TTL, t_alerta=None, fuente='ids', extra=None
         push()
     s = session_of(mac=mac)
     log('BLOQUEO' if nuevo else 'BLOQUEO_RENOVADO', mac=mac, usuario=s['usuario'] if s else None,
-        motivo=motivo, fuente=fuente, ttl=ttl, **(extra or {}))
+        src_ip=s.get('ip') if s else None, dst=dst, motivo=motivo, fuente=fuente,
+        accion='REGLA_T2_DROP', prioridad=40000, ttl=ttl, **(extra or {}))
     if len(hist) >= QUARANTINE_AFTER and not quarantine.get(mac):
         do_quarantine(mac, f'reincidencia R3: {motivo}', 600)
 
@@ -468,20 +476,44 @@ def on_intento(b, s):
     return True
 
 
+accesos = {}                 # (usuario, recurso) -> {n, primero, ultimo} (R2: permitidos)
+
+
+def on_acceso(b, s):
+    """Registro de accesos a recursos (R2): accesos que la política permite."""
+    usuario = s['usuario'] if s else None
+    recurso = (b.get('firma') or '').split('acceso permitido: ', 1)[-1]
+    now = time.time()
+    with lock:
+        c = accesos.setdefault((usuario or b.get('src_ip'), recurso), {'n': 0, 'primero': now})
+        c['n'] += 1
+        c['ultimo'] = now
+    log('ACCESO_PERMITIDO', usuario=usuario, rol=s['rol'] if s else None,
+        mac=s['mac'] if s else b.get('src_mac'), src_ip=b.get('src_ip'),
+        dst=f"{b.get('dest_ip')}:{b.get('dest_port') or '-'}/{b.get('proto') or '-'}",
+        recurso=recurso, sid=b.get('sid'))
+    return True
+
+
 def on_alert(b):
-    """Alerta de Suricata (agente del IDS): identifica al atacante y lo bloquea."""
-    if 2000000 <= int(b.get('sid') or 0) < 3000000:
+    """Alerta de Suricata (agente del IDS): identifica al atacante y lo bloquea.
+    Las firmas de R2 (sid 2000000-2999999) no bloquean: solo registran el acceso."""
+    sid = int(b.get('sid') or 0)
+    if 2500000 <= sid < 3000000:
+        return on_acceso(b, session_of(mac=b.get('src_mac')) or session_of(ip=b.get('src_ip')))
+    if 2000000 <= sid < 2500000:
         return on_intento(b, session_of(mac=b.get('src_mac')) or session_of(ip=b.get('src_ip')))
     s = session_of(mac=b.get('src_mac')) or session_of(ip=b.get('src_ip'))
     mac = (s['mac'] if s else b.get('src_mac') or '').lower()
     if not mac:
         log('ALERTA_SIN_ORIGEN', firma=b.get('firma'), src_ip=b.get('src_ip'))
         return False
+    dst = f"{b.get('dest_ip')}:{b.get('dest_port') or '-'}/{b.get('proto') or '-'}"
     log('ALERTA_IDS', firma=b.get('firma'), sid=b.get('sid'), src_ip=b.get('src_ip'),
-        mac=mac, usuario=s['usuario'] if s else None)
+        dst=dst, mac=mac, usuario=s['usuario'] if s else None)
     # Los relojes de las VMs no están sincronizados: el retardo del agente lo mide el IDS
     # con su reloj; el resto (recepción -> reglas) lo mide identity con el suyo (REGLAS ms).
-    do_block(mac, f"sid {b.get('sid')} {b.get('firma', '')}"[:80],
+    do_block(mac, f"sid {b.get('sid')} {b.get('firma', '')}"[:80], dst=dst,
              extra={'retardo_agente_ms': b.get('retardo_agente_ms'), 'ts_alerta_ids': b.get('ts')})
     return True
 
@@ -651,6 +683,8 @@ class H(BaseHTTPRequestHandler):
             return True
         if ip == RADIUS_IP and res == 'sessions' and method == 'POST' and not arg:
             return True
+        if ip == RADIUS_IP and res == 'cuenta' and method == 'POST' and not arg:
+            return True
         if ip in ONOS_IPS and res == 'aaa' and method == 'POST':
             return True
         if ip == IDS_IP and res == 'alert' and method == 'POST':
@@ -684,6 +718,19 @@ class H(BaseHTTPRequestHandler):
                     if s['mac'] == arg.lower():
                         finalize(k, 'ADMIN')
             return self.reply(200)
+        if res == 'cuenta' and method == 'POST':
+            # R1-03: el módulo de bloqueo de ldap-radius avisa fallos y bloqueos de cuentas
+            ev = {'fallo': 'INTENTO_FALLIDO', 'bloqueo': 'CUENTA_BLOQUEADA',
+                  'desbloqueo': 'CUENTA_DESBLOQUEADA'}.get(b.get('ev'))
+            if not ev:
+                return self.reply(400, {'error': 'ev debe ser fallo, bloqueo o desbloqueo'})
+            log(ev, usuario=str(b.get('usuario', ''))[:64], fallos=b.get('fallos'),
+                limite=b.get('limite'), hasta=b.get('hasta'))
+            return self.reply(200)
+        if res == 'accesos' and method == 'GET':
+            with lock:
+                return self.reply(200, [{'usuario': u, 'recurso': r, **c}
+                                        for (u, r), c in sorted(accesos.items())])
         if res == 'aaa' and method == 'POST':
             on_aaa_event(b)
             return self.reply(200)
