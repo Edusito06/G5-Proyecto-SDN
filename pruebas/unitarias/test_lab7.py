@@ -207,21 +207,25 @@ def test_3_1_3_R3_03_solo_el_paquete_con_ip_ajena_es_spoofing(r2ctl, politica):
 
 
 def test_3_1_3_R3_03_el_sensor_alerta_al_superar_el_umbral(idn, monkeypatch):
-    """identity convierte el contador de la regla de spoofing en bloqueo: bajo el umbral
-    (SPOOF_THRESHOLD - 1 paquetes en una lectura) no hace nada; al superarlo, bloquea."""
+    """identity suma los paquetes de la regla de spoofing en una ventana de 10 s (dos
+    lecturas de ONOS): 2 paquetes no bastan; 3 repartidos en dos lecturas, sí."""
     aprobar(idn, 'alu01', 200)
     idn.on_dhcp('add', MAC, '10.20.0.105')
     idn.spoof_prev.clear()
-    th = idn.SPOOF_THRESHOLD
+    assert idn.SPOOF_THRESHOLD == 3
+    reloj = [1000.0]
+    monkeypatch.setattr(idn.time, 'time', lambda: reloj[0])
     vistos = []
 
     def flows(n):
         return 200, {'flows': [{'id': 'f1', 'tableId': '1', 'priority': 45000, 'packets': n,
                                 'selector': {'criteria': [{'type': 'ETH_SRC', 'mac': MAC.upper()}]}}]}
-    lecturas = iter([flows(0), flows(th - 1), flows(th - 1 + th)])
+    # lecturas cada 2 s; ONOS cambia el contador cada 5 s: 0, 0, 2, 2, 2, 3 (hping3 -c 3)
+    lecturas = iter([flows(0), flows(0), flows(2), flows(2), flows(2), flows(3)])
 
     def onos(*a, **k):
-        vistos.append(dict(idn.blocks))
+        vistos.append(MAC in idn.blocks)
+        reloj[0] += 2
         try:
             return next(lecturas)
         except StopIteration:
@@ -229,9 +233,33 @@ def test_3_1_3_R3_03_el_sensor_alerta_al_superar_el_umbral(idn, monkeypatch):
     monkeypatch.setattr(idn.r2ctl, 'onos', onos)
     with pytest.raises(KeyboardInterrupt):
         idn.watch_spoofing()
-    assert vistos[2] == {}                                  # th - 1 paquetes: sin bloqueo
-    assert MAC in idn.blocks                                # th paquetes más: bloqueo
-    assert any(e['ev'] == 'BLOQUEO' and e['fuente'] == 'switch' for e in eventos(idn))
+    assert vistos[:6] == [False] * 6                        # con 2 paquetes, sin bloqueo
+    assert MAC in idn.blocks                                # el 3.º en la ventana: bloqueo
+    b = [e for e in eventos(idn) if e['ev'] == 'BLOQUEO'][0]
+    assert b['fuente'] == 'switch' and '3 paquetes en 10 s' in b['motivo']
+
+
+def test_3_1_3_R3_03_paquetes_sueltos_fuera_de_la_ventana_no_bloquean(idn, monkeypatch):
+    aprobar(idn, 'alu01', 200)
+    idn.on_dhcp('add', MAC, '10.20.0.105')
+    idn.spoof_prev.clear()
+    reloj = [1000.0]
+    monkeypatch.setattr(idn.time, 'time', lambda: reloj[0])
+    flows = lambda n: (200, {'flows': [{'id': 'f1', 'tableId': '1', 'priority': 45000, 'packets': n,
+                                        'selector': {'criteria': [{'type': 'ETH_SRC', 'mac': MAC.upper()}]}}]})
+    lecturas = iter([flows(0), flows(1), flows(1), flows(1), flows(1), flows(1), flows(1), flows(2),
+                     flows(2), flows(2), flows(2), flows(2), flows(2), flows(3)])   # 1 cada ~12 s
+
+    def onos(*a, **k):
+        reloj[0] += 2
+        try:
+            return next(lecturas)
+        except StopIteration:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(idn.r2ctl, 'onos', onos)
+    with pytest.raises(KeyboardInterrupt):
+        idn.watch_spoofing()
+    assert MAC not in idn.blocks
 
 
 def test_3_2_1_R3_05_regla_de_bloqueo_solo_para_el_atacante(r2ctl, politica):

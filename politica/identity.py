@@ -52,7 +52,8 @@ ONOS_IPS = set(os.getenv('ONOS_IPS', '192.168.0.16 192.168.0.17').split())  # ag
 IDS_IP = os.getenv('IDS_IP', '192.168.0.22')            # Suricata (agente de alertas, R3)
 BLOCK_TTL = int(os.getenv('BLOCK_TTL', '300'))           # s de bloqueo por alerta
 QUARANTINE_AFTER = 3                                     # alertas en 10 min -> cuarentena
-SPOOF_THRESHOLD = 3                                      # paquetes con IP ajena en 2 s
+SPOOF_THRESHOLD = 3                                      # paquetes con IP ajena en SPOOF_VENTANA s
+SPOOF_VENTANA = 10       # s: cubre dos lecturas de ONOS (cada 5 s), así 3 paquetes en 3 s cuentan juntos
 SESSION_TTL = 3600           # = Session-Timeout de FreeRADIUS
 JOIN_WINDOW = 30             # s para unir la respuesta de RADIUS con AAA
 AAA_REST = 'http://127.0.0.1:8181/onos/aaa/app/users'
@@ -627,14 +628,15 @@ def watch_ddos():
             log('ERROR_DDOS', error=str(e)[:160])
 
 
-spoof_prev = {}              # flow id -> paquetes de la regla T1 de spoofing
+spoof_prev = {}              # flow id -> [(t, paquetes)] de la regla T1 de spoofing (ventana)
 spoof_gracia = {}            # mac -> hasta cuándo no se evalúa (tras levantar un bloqueo)
 SPOOF_GRACIA = 8             # s: las estadísticas de ONOS llegan con hasta ~5 s de retraso
 
 
 def watch_spoofing():
     """Sensor en el switch: la regla T1 'IP de origen ajena' de cada usuario cuenta los
-    paquetes falsificados (que ya se descartan). Si sube de golpe, se bloquea la MAC."""
+    paquetes falsificados (que ya se descartan). Si en los últimos SPOOF_VENTANA segundos
+    suma SPOOF_THRESHOLD o más, se bloquea la MAC."""
     while True:
         time.sleep(2)
         try:
@@ -646,16 +648,21 @@ def watch_spoofing():
                     continue
                 mac = next((c['mac'].lower() for c in f['selector']['criteria']
                             if c['type'] == 'ETH_SRC'), None)
-                prev = spoof_prev.get(f['id'])
-                spoof_prev[f['id']] = f.get('packets', 0)
-                if mac and spoof_gracia.get(mac, 0) > time.time():
-                    continue                     # paquetes viejos del ataque ya levantado
-                if prev is not None and mac and f.get('packets', 0) - prev >= SPOOF_THRESHOLD:
+                now, pk = time.time(), f.get('packets', 0)
+                hist = [(t, n) for t, n in spoof_prev.get(f['id'], []) if now - t <= SPOOF_VENTANA and n <= pk]
+                hist.append((now, pk))                   # n > pk: regla reinstalada, se reinicia
+                spoof_prev[f['id']] = hist
+                if mac and spoof_gracia.get(mac, 0) > now:
+                    spoof_prev[f['id']] = [(now, pk)]    # paquetes viejos del ataque ya levantado
+                    continue
+                suma = pk - hist[0][1]
+                if len(hist) > 1 and mac and suma >= SPOOF_THRESHOLD:
                     with lock:
-                        ya = mac in blocks and blocks[mac]['expira'] > time.time()
+                        ya = mac in blocks and blocks[mac]['expira'] > now
                     if not ya:
-                        do_block(mac, f'IP spoofing ({f["packets"] - prev} paquetes en 2 s)',
+                        do_block(mac, f'IP spoofing ({suma} paquetes en {SPOOF_VENTANA} s)',
                                  fuente='switch')
+                        spoof_prev[f['id']] = [(now, pk)]
         except Exception as e:                           # noqa: BLE001
             log('ERROR_SPOOFING', error=str(e)[:160])
 

@@ -226,7 +226,7 @@ sequenceDiagram
 | Espejo `g05-ids` (`files/ids/g05-espejo.sh`) | R-SW1, `g05-espejo.service` | Copia ens7 (usuarios) en ambos sentidos a un puerto GRE (`key 4735`) hacia 192.168.0.22. Es un espejo de OVSDB y no toca el pipeline de OpenFlow |
 | Suricata 7 (`files/ids/ids-setup.sh`) | VM IDS, interfaz `ids-gre` (gretap) | Solo las firmas del G05 (`files/ids/g05.rules`), EVE con MAC de origen |
 | `ids-agent` (`files/ids/ids-agent.py`) | VM IDS | Sigue `eve.json` y envía cada alerta a `identity` (deduplicada 5 s) |
-| Sensor de spoofing | `identity` + regla T1 prioridad 45000 por usuario | Cuenta los paquetes con IP de origen ajena que T1 ya descarta. Si suben ≥ 5 en 2 s, bloquea la MAC sin depender del IDS |
+| Sensor de spoofing | `identity` + regla T1 prioridad 45000 por usuario | Cuenta los paquetes con IP de origen ajena que T1 ya descarta. Si suman 3 o más en una ventana de 10 s (dos lecturas de ONOS), bloquea la MAC sin depender del IDS |
 | Registro de incidentes | ONOS-1, `/var/log/g05/incidentes.jsonl` | Alerta → bloqueo → regla aplicada → fin. Se consulta con `GET /identity/incidents` o `pruebas/incidentes.sh` |
 
 **Firmas:** escaneo de puertos (SYN a puertos no ofrecidos), barrido ICMP, escaneo TCP de red, IP spoofing, inyección SQL, XSS, path traversal (sobre la URI cruda), herramientas de ataque por User-Agent, ráfaga de requests HTTP (bot) e inundación de SYN. Los umbrales se calibraron con la matriz de R2 y con tráfico legítimo, para no dar falsos positivos.
@@ -341,7 +341,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── templates/                Plantilla del perfil estático anterior
 │   └── evidencia/                Evidencia JSON generada en el slice
 ├── pruebas/
-│   ├── unitarias/                pytest: r2ctl, identity, R4, redundancia y las 12 del Lab 7 (124 pruebas)
+│   ├── unitarias/                pytest: r2ctl, identity, R4, redundancia y las 12 del Lab 7 (125 pruebas)
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
 │   ├── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
 │   ├── prueba-r1.sh              R1: accesos inválidos, latencia de autenticación y auth/s
@@ -496,7 +496,7 @@ Corren en segundos, sin el slice ni la red: importan el código y lo ejercitan c
 
 ```bash
 python3 -m pip install pytest pyyaml
-python3 -m pytest pruebas/unitarias -q        # 124 passed (113 sin red + 11 en el slice)
+python3 -m pytest pruebas/unitarias -q        # 125 passed (114 sin red + 11 en el slice)
 ```
 
 | Suite | Pruebas | Qué comprueba |
@@ -524,7 +524,7 @@ python3 -m pytest pruebas/unitarias -q        # 124 passed (113 sin red + 11 en 
 | R2 (logs) | 2.3.1 | `identity.on_acceso` / `on_intento` | Accesos permitidos y denegados registrados con usuario, sin bloquear |
 | R3-01 | 3.1.1–3.1.2 | Firma sid 1000001 (Suricata) | 10 SYN a puertos no ofrecidos: sin alerta; 11: alerta con origen y destino. 15 conexiones a 22/53/80/443: sin alerta (falso positivo) |
 | R3-02 | 3.1.3 | Firmas 1000002 / 1000003 | Barrido ICMP: 15 hosts sin alerta, 16 con alerta; 11 hosts por TCP: alerta; identifica el origen |
-| R3-03 | 3.1.3 | Reglas T1 (puerto + MAC + IP) y `identity.watch_spoofing` | El paquete legítimo pasa y el de IP ajena se descarta y cuenta; sobre el umbral (3 en 2 s) se bloquea |
+| R3-03 | 3.1.3 | Reglas T1 (puerto + MAC + IP) y `identity.watch_spoofing` | El paquete legítimo pasa y el de IP ajena se descarta y cuenta; con 3 en una ventana de 10 s se bloquea (también si ONOS los reparte en dos lecturas, como con `hping3 -c 3`); paquetes sueltos fuera de la ventana no |
 | R3-04 | 3.1.4 | Firma 1000020 | 40 GET en 8 s: sin alerta; 41: alerta; dos clientes contra el mismo servidor, ambos identificados |
 | R3-05 | 3.2.1–3.2.2 | `r2ctl.compile_all` (T2) e `identity.vencer` | Regla de descarte (prioridad 40000) exacta para la MAC del atacante; el vecino del mismo puerto sigue pasando; el bloqueo vence a los 300 s y la regla se retira |
 | R3-06 | 3.3.1 | `identity.log` (`incidentes.jsonl`) | El incidente tiene fecha ISO-8601, firma, origen, destino, usuario y acción (`REGLA_T2_DROP`, TTL) |
