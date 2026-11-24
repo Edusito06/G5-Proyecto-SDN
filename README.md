@@ -16,6 +16,7 @@ Requerimientos del grupo: **R1** (control de acceso por rol), **R2** (protecció
 - [Requisitos](#requisitos)
 - [Despliegue](#despliegue)
 - [Verificación](#verificación)
+- [Pruebas unitarias](#pruebas-unitarias)
 - [Pruebas de falla y resultados](#pruebas-de-falla-y-resultados)
 - [Decisiones técnicas y lecciones](#decisiones-técnicas-y-lecciones)
 - [Demo R2 (slice anterior)](#demo-r2-slice-anterior)
@@ -297,6 +298,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── templates/                Plantilla del perfil estático anterior
 │   └── evidencia/                Evidencia JSON generada en el slice
 ├── pruebas/
+│   ├── unitarias/                pytest sin red: r2ctl, identity y g05-redundancia (69 pruebas)
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
 │   ├── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
 │   ├── prueba-r1.sh              R1: accesos inválidos, latencia de autenticación y auth/s
@@ -443,6 +445,28 @@ En modo **dinámico** (`modo: dinamico` en `topology.yaml`) las vinculaciones vi
 
 G01 (ONOS) queda fuera de la matriz: el plano de control in-band no acepta tráfico de usuarios, solo se administra por la red de gestión.
 
+## Pruebas unitarias
+
+Corren en segundos, sin el slice ni la red: importan el código y lo ejercitan con datos sintéticos.
+
+```bash
+python3 -m pip install pytest pyyaml
+python3 -m pytest pruebas/unitarias -q        # 69 passed
+```
+
+| Suite | Pruebas | Qué comprueba |
+|---|---|---|
+| `test_r2ctl.py` | 17 | Un **simulador del pipeline OpenFlow** recorre las reglas compiladas para R-SW1 tabla por tabla, como OVS. Su veredicto se compara con el oráculo de `policy.yaml` en las **216 combinaciones** de la matriz. También cubre: bloque crítico, IP falsa (descartada y contada por el sensor de R3), MAC desconocida, bloqueo de R3 sobre tráfico permitido, cuarentena, ventana DHCP con la VLAN del rol, retorno sin etiqueta, EAPOL al controlador, 7 reglas por sesión y las firmas del IDS de cada rol |
+| `test_identity.py` | 27 | R1: unión RADIUS + AAA y rechazo si falta RADIUS, es de otro usuario, venció o trae una VLAN inexistente. DHCP solo dentro de la subred del rol, reautenticación, cambio de rol y de puerto, persistencia. R3: bloqueo por alerta, cuarentena a la tercera, alerta sin origen. R2: intento denegado registrado sin bloquear. API: qué origen puede llamar a qué (11 casos) |
+| `test_redundancia.py` | 25 | Un simulador del control in-band sigue el TCP/6653 de los 6 switches hacia **ONOS-1 y ONOS-2, ida y vuelta**, con los grupos Fast Failover. Se prueba sin fallas, con **cada uno de los 9 enlaces caído** y con **Core-1 caído** |
+
+Las pruebas detectan errores reales:
+- **Mutación:** si se agrega a mano en las reglas compiladas un permiso del alumno hacia Notas, la matriz simulada marca 3 discrepancias.
+- **Fallo encontrado en el plan de redundancia:** `test_redundancia` encontró un caso que las pruebas en el slice no habían cubierto. Con el enlace Core-1 ↔ Core-2 caído, la respuesta de ONOS-2 hacia Core-2 salía de R-SW2 por Core-1 y se perdía en el enlace caído, porque el grupo Fast Failover de R-SW2 no puede vigilar ese enlace. Ahora R-SW2 alcanza a Core-2 por su enlace directo, con Core-1 como respaldo (grupo 50002).
+- **Comprobado en el slice:** con Core-1 ↔ Core-2 caído 20 s, Core-2 mantuvo sus dos sesiones OpenFlow, incluida la de ONOS-2, que era su master (`sec_since_connect` siguió creciendo).
+
+---
+
 ## Pruebas de falla y resultados
 
 `pruebas/prueba-fallas.sh` apaga interfaces con `ip link`, espera 15 s, mide y restaura. El indicador es `sec_since_connect` de cada sesión OpenFlow: si sigue creciendo durante la falla, la sesión **nunca se cortó**.
@@ -453,6 +477,7 @@ G01 (ONOS) queda fuera de la matriz: el plano de control in-band no acepta tráf
 | T2 · cae Core-1 ↔ DC-DIST | Ninguna sesión se corta | Core-1 sale por el enlace inter-core |
 | T3 · cae Core-2 ↔ DC-DIST | Ninguna sesión se corta | DC-DIST alcanza Core-2 vía Core-1 |
 | T4 · cae Core-1 completo | Los otros 5 switches siguen conectados | Las hojas suben por Core-2 |
+| T5 · cae Core-1 ↔ Core-2 | Core-2 mantiene ONOS-1 y ONOS-2 | R-SW2 entrega a Core-2 por su enlace directo |
 
 Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con BFD (`min_rx = min_tx = 100 ms`) tarda menos de 0,5 s, por debajo del margen de *keepalive* de OpenFlow.
 

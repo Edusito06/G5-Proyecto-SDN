@@ -117,11 +117,11 @@ def plan(host):
             add(P_TRANSIT, o, ONOS, IP[peer], False, f"group:{gid}")
     else:
         raise SystemExit(f"Host desconocido: {host}")
-    plan_onos2(host, me, fab, add)
+    plan_onos2(host, me, fab, add, groups)
     return groups, flows
 
 
-def plan_onos2(host, me, fab, add):
+def plan_onos2(host, me, fab, add, groups):
     """Caminos ARP/OpenFlow hacia ONOS-2 (10.100.0.9), colgado de R-SW2.
 
     Reutiliza los grupos Fast Failover del plan principal: en las hojas y en DC-DIST
@@ -131,10 +131,14 @@ def plan_onos2(host, me, fab, add):
     others = [s for s in IP if s != host]
     if host == "r-sw2":
         o2 = fab["onos-2"]
+        # Hacia cada core, primero su enlace directo: por el otro core haría falta el
+        # enlace entre cores, que el grupo FF de R-SW2 no puede vigilar.
+        groups[GBASE + 1] = [fab["core-2"], fab["core-1"]]
         add(P_LOCAL, "LOCAL", me, ONOS2, True, f"output:{o2}")
         add(P_TRANSIT, o2, ONOS2, me, False, "LOCAL")
         for peer in others:
-            add(P_TRANSIT, o2, ONOS2, IP[peer], False, f"group:{GBASE}")
+            add(P_TRANSIT, o2, ONOS2, IP[peer], False,
+                f"group:{GBASE + 1 if peer == 'core-2' else GBASE}")
             for p in (fab["core-1"], fab["core-2"]):
                 add(P_TRANSIT, p, IP[peer], ONOS2, True, f"output:{o2}")
     elif host in LEAVES or host == ROOT:
