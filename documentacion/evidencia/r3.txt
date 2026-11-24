@@ -1,0 +1,74 @@
+== Preparación: atacante 802.1X y testigo invitado
+u-alu (alu01): EAP-Success (supplicant)
+u-alu@if3        UP             10.20.0.102/24 
+u-inv@if3        UP             10.10.0.101/24 
+
+=== Falsos positivos: 60 s de tráfico legítimo del atacante (antes de atacar)
+  alertas durante el tráfico legítimo: 0
+  atacante->Portal al terminar: sí
+
+=== Escaneo de puertos (nmap SYN a 101 puertos)
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 0.8 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:33:01", "ev": "ALERTA_IDS", "firma": "G05 R3 escaneo de puertos (SYN a puertos no ofrecidos)", "sid": 1000001, "src_ip": "10.20.0.102", "dst": "10.100.1.150:1056/TCP", "mac": "02:05:00:00:00:02", "usuario": "alu01"}
+  {"t": "06:33:01", "ev": "BLOQUEO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": "10.100.1.150:1056/TCP", "motivo": "sid 1000001 G05 R3 escaneo de puertos (SYN a puertos no ofrecidos)", "fuente": 
+
+=== Escaneo de red (barrido ICMP a 40 hosts)
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 1.1 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:33:16", "ev": "ALERTA_IDS", "firma": "G05 R3 escaneo de red (barrido ICMP)", "sid": 1000002, "src_ip": "10.20.0.102", "dst": "10.100.0.76:-/ICMP", "mac": "02:05:00:00:00:02", "usuario": "alu01"}
+  {"t": "06:33:16", "ev": "BLOQUEO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": "10.100.0.76:-/ICMP", "motivo": "sid 1000002 G05 R3 escaneo de red (barrido ICMP)", "fuente": "ids", "accion": "REG
+
+=== Escaneo de red (nmap -sn -PS80 a 64 hosts de otra subred)
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 0.8 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:33:34", "ev": "ALERTA_IDS", "firma": "G05 R3 escaneo de red (destinos fuera de los servicios)", "sid": 1000003, "src_ip": "10.20.0.102", "dst": "10.30.0.27:80/TCP", "mac": "02:05:00:00:00:02", "usuario": "alu01"}
+  {"t": "06:33:34", "ev": "BLOQUEO_RENOVADO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": "10.30.0.27:80/TCP", "motivo": "sid 1000003 G05 R3 escaneo de red (destinos fuera de los servicios)", "fue
+
+=== IP spoofing externo (hping3 -a 198.51.100.7)
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 0.3 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:33:45", "ev": "ALERTA_IDS", "firma": "G05 R3 IP spoofing (origen fuera de las subredes del campus)", "sid": 1000004, "src_ip": "198.51.100.7", "dst": "10.100.1.150:80/TCP", "mac": "02:05:00:00:00:02", "usuario": "alu01"}
+  {"t": "06:33:45", "ev": "BLOQUEO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": "10.100.1.150:80/TCP", "motivo": "sid 1000004 G05 R3 IP spoofing (origen fuera de las subredes del campus)", "fuent
+
+=== IP spoofing interno (hping3 -a 10.20.0.77, misma subred)
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 4.5 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:33:47", "ev": "BLOQUEO_LEVANTADO", "mac": "02:05:00:00:00:02"}
+  {"t": "06:34:00", "ev": "BLOQUEO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": null, "motivo": "IP spoofing (40 paquetes en 10 s)", "fuente": "switch", "accion": "REGLA_T2_DROP", "prioridad": 40
+
+=== Request malicioso (inyección SQL)
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 0.5 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:34:11", "ev": "ALERTA_IDS", "firma": "G05 R3 request malicioso: inyección SQL", "sid": 1000010, "src_ip": "10.20.0.102", "dst": "10.100.1.150:80/TCP", "mac": "02:05:00:00:00:02", "usuario": "alu01"}
+  {"t": "06:34:11", "ev": "BLOQUEO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": "10.100.1.150:80/TCP", "motivo": "sid 1000010 G05 R3 request malicioso: inyección SQL", "fuente": "ids", "accion":
+
+=== Request malicioso (path traversal)
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 0.3 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:34:22", "ev": "ALERTA_IDS", "firma": "G05 R3 request malicioso: path traversal", "sid": 1000012, "src_ip": "10.20.0.102", "dst": "10.100.1.150:80/TCP", "mac": "02:05:00:00:00:02", "usuario": "alu01"}
+  {"t": "06:34:22", "ev": "BLOQUEO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": "10.100.1.150:80/TCP", "motivo": "sid 1000012 G05 R3 request malicioso: path traversal", "fuente": "ids", "accion":
+
+=== Bot: ráfaga de 60 requests HTTP
+  antes: atacante->Portal sí
+  atacante pierde el acceso a los: 0.8 s
+  testigo (invitado) -> Mesa de ayuda: sí
+  {"t": "06:34:34", "ev": "ALERTA_IDS", "firma": "G05 R3 ráfaga de requests HTTP (bot)", "sid": 1000020, "src_ip": "10.20.0.102", "dst": "10.100.1.150:80/TCP", "mac": "02:05:00:00:00:02", "usuario": "alu01"}
+  {"t": "06:34:34", "ev": "BLOQUEO", "mac": "02:05:00:00:00:02", "usuario": "alu01", "src_ip": "10.20.0.102", "dst": "10.100.1.150:80/TCP", "motivo": "sid 1000020 G05 R3 ráfaga de requests HTTP (bot)", "fuente": "ids", "accion": "R
+
+=== Resumen (segundos hasta que el atacante pierde el acceso)
+  Escaneo de puertos (nmap SYN a 101 puertos)                0.8
+  Escaneo de red (barrido ICMP a 40 hosts)                   1.1
+  Escaneo de red (nmap -sn -PS80 a 64 hosts de otra subred)  0.8
+  IP spoofing externo (hping3 -a 198.51.100.7)               0.3
+  IP spoofing interno (hping3 -a 10.20.0.77, misma subred)   4.5
+  Request malicioso (inyección SQL)                         0.5
+  Request malicioso (path traversal)                         0.3
+  Bot: ráfaga de 60 requests HTTP                           0.8

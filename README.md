@@ -362,6 +362,10 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── escala.py                 Sesiones sintéticas para la prueba de escalabilidad (en ONOS-1)
 │   ├── ddos.py                   R4: detector de DDoS por consumo (sin E/S, lo usa identity)
 │   └── g05-r1.sh                 Cliente 802.1X/DHCP por namespace (login | logout | status | dhcp)
+├── documentacion/
+│   ├── EXP_TEL354_LAB7_G5.pdf    Informe del Lab 7 (arquitectura, políticas, R3/R4, plan de pruebas, métricas)
+│   ├── generar_informe.py        Lo genera desde el repo: matriz desde policy.yaml y resultados desde pytest -v
+│   └── evidencia/                Capturas del slice (ONOS, OVS, radius.log, incidentes) y salida de pytest
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
     └── r2/                       r2ctl: despliegue declarativo de la política R2

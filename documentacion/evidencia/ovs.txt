@@ -1,0 +1,33 @@
+# R3: bloqueo de alu01 (regla T2 en R-SW1)
+{} cookie=0xb20000b835f9af, table=2, n_packets=0, n_bytes=0, send_flow_rem priority=40000,in_port=4,dl_src=02:05:00:00:00:02 actions=drop
+ cookie=0xb20000efb83f42, table=2, n_packets=0, n_bytes=0, send_flow_rem priority=0 actions=drop
+ cookie=0xb200002111a1d9, table=2, n_packets=1099987, n_bytes=1187065526, send_flow_rem priority=1 actions=goto_table:3
+{}
+# R4: límite de alu01 (meter propio + regla T2)
+{}meter=1 pktps burst bands=
+type=drop rate=5 burst_size=5
+meter=2 pktps burst bands=
+type=drop rate=10 burst_size=10
+meter=3 kbps burst bands=
+type=drop rate=2000 burst_size=2000
+ cookie=0xb20000d1e870cb, table=2, n_packets=0, n_bytes=0, send_flow_rem priority=39000,in_port=4,dl_src=02:05:00:00:00:02 actions=meter:3,goto_table:3
+ cookie=0xb20000efb83f42, table=2, n_packets=0, n_bytes=0, send_flow_rem priority=0 actions=drop
+ cookie=0xb200002111a1d9, table=2, n_packets=1099987, n_bytes=1187065526, send_flow_rem priority=1 actions=goto_table:3
+{}
+# R2: política T4 del alumno (VLAN 200)
+ cookie=0xb2000033eeb4ec, table=4, send_flow_rem priority=21000,dl_vlan=200 actions=goto_table:5
+ cookie=0xb20000506463a8, table=4, send_flow_rem priority=25000,udp,dl_vlan=200,nw_dst=10.100.1.128/28,tp_dst=53 actions=goto_table:5
+ cookie=0xb200004ecf36d6, table=4, send_flow_rem priority=25000,tcp,dl_vlan=200,nw_dst=10.100.1.128/28,tp_dst=53 actions=goto_table:5
+ cookie=0xb200004234a039, table=4, send_flow_rem priority=25000,tcp,dl_vlan=200,nw_dst=10.100.1.144/28,tp_dst=80 actions=goto_table:5
+ cookie=0xb200002bda79ca, table=4, send_flow_rem priority=25000,tcp,dl_vlan=200,nw_dst=10.100.1.144/28,tp_dst=443 actions=goto_table:5
+ cookie=0xb20000f68101b1, table=4, send_flow_rem priority=25000,ip,dl_vlan=200,nw_dst=10.100.1.0/25 actions=goto_table:5
+ cookie=0xb2000090285e37, table=4, send_flow_rem priority=23000,ip,dl_vlan=200,nw_dst=10.100.0.0/25 actions=meter:2,CONTROLLER:65535
+ cookie=0xb20000eb31fe65, table=4, send_flow_rem priority=22000,ip,dl_vlan=200,nw_dst=192.168.0.0/16 actions=drop
+
+# Reglas por tabla en R-SW1
+tabla 0: 31
+tabla 1: 4
+tabla 2: 2
+tabla 3: 2
+tabla 4: 58
+tabla 5: 10

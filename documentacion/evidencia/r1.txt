@@ -1,0 +1,24 @@
+# radius.log (FreeRADIUS): un acceso correcto y los rechazos con su motivo
+Tue Nov 24 06:25:14 2026 : Auth: (1305) Login OK: [alu01]
+Tue Nov 24 06:29:07 2026 : Auth: (1335) Login OK: [alu01]
+Tue Nov 24 06:22:38 2026 : Auth: (1167) Login incorrect (eap_tls: (TLS) OpenSSL says error 23 : certificate revoked): [alu01]
+Tue Nov 24 06:22:39 2026 : Auth: (1168) Login incorrect (eap: EAP-Identity Unknown): [<no User-Name attribute>]
+Tue Nov 24 06:22:40 2026 : Auth: (1169) Login incorrect (Rejected: User-Name contains whitespace): [' OR '1'='1]
+Tue Nov 24 06:22:41 2026 : Auth: (1175) Login incorrect (eap_tls: (TLS) TLS - Alert write:fatal:internal error): [*]
+Tue Nov 24 06:22:43 2026 : Auth: (1181) Login incorrect (eap_tls: (TLS) TLS - Alert write:fatal:internal error): [alu01)(uid=*]
+Tue Nov 24 06:22:44 2026 : Auth: (1188) Login incorrect (usuario sin grupo de red): [sing01]
+Tue Nov 24 06:22:47 2026 : Auth: (1215) Login incorrect (eap_tls: (TLS) TLS - Alert write:fatal:internal error): [prueba01]
+Tue Nov 24 06:22:48 2026 : Auth: (1221) Login incorrect (eap_tls: (TLS) TLS - Alert write:fatal:internal error): [prueba01]
+Tue Nov 24 06:22:49 2026 : Auth: (1227) Login incorrect (eap_tls: (TLS) TLS - Alert write:fatal:internal error): [prueba01]
+Tue Nov 24 06:22:50 2026 : Auth: (1233) Login incorrect (eap_tls: (TLS) TLS - Alert write:fatal:internal error): [prueba01]
+Tue Nov 24 06:22:53 2026 : Auth: (1239) Login incorrect (eap_tls: (TLS) TLS - Alert write:fatal:internal error): [prueba01]
+Tue Nov 24 06:22:55 2026 : Auth: (1246) Login incorrect (cuenta bloqueada por intentos fallidos): [prueba01]
+
+# g05-bloqueo (ldap-radius): prueba R1-03 con prueba01
+{"t": "06:22:47", "ev": "FALLO", "usuario": "prueba01", "fallos": 1, "bloqueado": false}
+{"t": "06:22:48", "ev": "FALLO", "usuario": "prueba01", "fallos": 2, "bloqueado": false}
+{"t": "06:22:49", "ev": "FALLO", "usuario": "prueba01", "fallos": 3, "bloqueado": false}
+{"t": "06:22:50", "ev": "FALLO", "usuario": "prueba01", "fallos": 4, "bloqueado": false}
+{"t": "06:22:53", "ev": "FALLO", "usuario": "prueba01", "fallos": 5, "bloqueado": true}
+{"t": "06:22:53", "ev": "BLOQUEO", "usuario": "prueba01", "hasta": "06:37:53", "ldap": "ok"}
+{"t": "06:22:55", "ev": "FALLO", "usuario": "prueba01", "fallos": 5, "bloqueado": true}
