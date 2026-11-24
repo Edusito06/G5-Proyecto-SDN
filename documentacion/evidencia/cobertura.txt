@@ -1,0 +1,21 @@
+........................................................................ [ 57%]
+.....................................................                    [100%]
+================================ tests coverage ================================
+_______________ coverage: platform darwin, python 3.9.6-final-0 ________________
+
+Name                                       Stmts   Miss  Cover
+--------------------------------------------------------------
+infraestructura/files/evidencia_arbol.py      59     59     0%
+infraestructura/files/g05-bloqueo.py         132     76    42%
+infraestructura/files/g05-redundancia.py     189     72    62%
+infraestructura/files/g05-servicios.py       107    107     0%
+infraestructura/files/paper-bridge.py        170    170     0%
+infraestructura/files/svc.py                  55     55     0%
+politica/aaa-agent.py                         30     30     0%
+politica/ddos.py                              79      5    94%
+politica/escala.py                            68     68     0%
+politica/identity.py                         606    311    49%
+politica/r2ctl.py                            737    416    44%
+--------------------------------------------------------------
+TOTAL                                       2232   1369    39%
+125 passed in 30.41s

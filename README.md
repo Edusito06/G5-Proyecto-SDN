@@ -365,6 +365,8 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 ├── documentacion/
 │   ├── EXP_TEL354_LAB7_G5.pdf    Informe del Lab 7 (arquitectura, políticas, R3/R4, plan de pruebas, métricas)
 │   ├── generar_informe.py        Lo genera desde el repo: matriz desde policy.yaml y resultados desde pytest -v
+│   ├── INFORME_PREVIO_TEL354_LAB7_G5.pdf  Informe previo (decisiones, módulos R1/R2, hipótesis de falla, cobertura)
+│   ├── generar_informe_previo.py Lo genera desde el repo (reutiliza generar_informe.py)
 │   └── evidencia/                Capturas del slice (ONOS, OVS, radius.log, incidentes) y salida de pytest
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
