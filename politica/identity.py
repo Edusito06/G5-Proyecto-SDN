@@ -124,7 +124,12 @@ def subred(rol):
 def save():
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     tmp = STATE + '.tmp'
-    json.dump(list(sessions.values()), open(tmp, 'w'))
+    # El archivo se cierra (y se vuelca al disco) antes del os.replace: con
+    # json.dump(..., open(...)) Python 3.12 renombraba el archivo todavía vacío.
+    with open(tmp, 'w') as f:
+        json.dump(list(sessions.values()), f)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, STATE)
 
 

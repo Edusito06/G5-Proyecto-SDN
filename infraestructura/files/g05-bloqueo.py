@@ -102,7 +102,10 @@ def avisar(ev, usuario, **kw):
 def guardar(estado):
     os.makedirs(os.path.dirname(ESTADO), exist_ok=True)
     tmp = ESTADO + '.tmp'
-    json.dump(estado, open(tmp, 'w'))
+    with open(tmp, 'w') as f:              # cerrado y en disco antes del os.replace
+        json.dump(estado, f)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, ESTADO)
 
 
