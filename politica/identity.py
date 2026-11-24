@@ -43,6 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 os.environ['R2_LOCAL'] = '1'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import r2ctl  # noqa: E402
+import ddos  # noqa: E402
 
 STATE = os.getenv('R2_SESSIONS', '/var/lib/r2/sessions.json')
 RADIUS_IP = os.getenv('RADIUS_IP', '192.168.0.19')      # FreeRADIUS (red de gestión)
@@ -79,7 +80,9 @@ EV_INCIDENTE = {'ALERTA_IDS', 'ALERTA_SIN_ORIGEN', 'BLOQUEO', 'BLOQUEO_RENOVADO'
                 # R1: intentos fallidos (802.1X rechazado, DHCP o acceso sin sesión)
                 'SESION_RECHAZADA', 'ACCESO_DENEGADO', 'DHCP_SIN_SESION',
                 # R2: intentos contra recursos que la política del rol no permite
-                'INTENTO_DENEGADO'}
+                'INTENTO_DENEGADO',
+                # R4: fuentes de DDoS limitadas con meter
+                'DDOS_DETECTADO', 'LIMITE_LEVANTADO'}
 inc_lock = threading.Lock()
 
 
@@ -140,6 +143,9 @@ def worker():
                     b = blocks.get(x['mac'])
                     if b and b['expira'] > time.time():
                         x['bloqueado'], x['motivo_bloqueo'] = True, b['motivo']
+                    lim = limits.get(x['mac'])
+                    if lim and lim.get('meter'):
+                        x['limite_meter'] = lim['meter']
                 pend = dict(mitigacion_pendiente)
                 mitigacion_pendiente.clear()
             t0 = time.time()
@@ -480,6 +486,115 @@ def on_alert(b):
     return True
 
 
+# --------------------------------------------------------------------- R4
+DDOS_POLL = float(os.getenv('DDOS_POLL', '2.5'))      # s (ONOS lee contadores cada 5 s)
+LIMIT_KBPS = int(os.getenv('DDOS_LIMIT_KBPS', '2000'))  # kbit/s por fuente (OVS: kbps)
+limits = {}                  # mac -> {meter, dev, desde, motivo} (R4: tabla 2 con meter)
+detector = ddos.Detector()
+PREF2G = {rec['prefijo']: g for g, rec in pol['recursos'].items()}
+
+
+def crear_meter(dev):
+    """Meter propio de la fuente: descarta lo que supere LIMIT_KBPS. Devuelve su id."""
+    antes = {r2ctl._mid(m) for m in r2ctl.list_meters(dev)}
+    code, _ = r2ctl.onos('POST', f'/meters/{dev}', {
+        'deviceId': dev, 'appId': r2ctl.APP, 'unit': 'KB_PER_SEC', 'burst': True,
+        'bands': [{'type': 'DROP', 'rate': LIMIT_KBPS, 'burstSize': LIMIT_KBPS}]})
+    if code not in (200, 201):
+        return None
+    for _ in range(20):
+        nuevos = [r2ctl._mid(m) for m in r2ctl.list_meters(dev)
+                  if r2ctl._mid(m) not in antes and m.get('unit') == 'KB_PER_SEC']
+        if nuevos:
+            return min(nuevos)
+        time.sleep(0.1)
+    return None
+
+
+def do_limit(mac, det, fuente='monitor'):
+    mac = mac.lower()
+    s = session_of(mac=mac)
+    if not s or mac in limits:
+        return False
+    dev = topo['switches'][s['switch']]['dpid']
+    meter = crear_meter(dev)
+    if meter is None:
+        log('ERROR_LIMITE', mac=mac, error='ONOS no creó el meter')
+        return False
+    now = time.time()
+    with lock:
+        limits[mac] = {'meter': meter, 'dev': dev, 'desde': now, 'motivo': det.get('motivo')}
+        mitigacion_pendiente[mac] = now
+        push()
+    log('DDOS_DETECTADO', usuario=s['usuario'], rol=s['rol'], mac=mac, ip=s.get('ip'),
+        fuente=fuente, limite_kbps=LIMIT_KBPS, meter=meter, **det)
+    return True
+
+
+def lift_limit(mac, det=None):
+    mac = mac.lower()
+    with lock:
+        lim = limits.pop(mac, None)
+        if not lim:
+            return False
+        push()
+    for _ in range(50):                      # primero se retira la regla, luego el meter
+        time.sleep(0.1)
+        if not dirty.is_set() and not busy.is_set():
+            break
+    r2ctl.onos('DELETE', f'/meters/{lim["dev"]}/{lim["meter"]}')
+    log('LIMITE_LEVANTADO', mac=mac, duracion_s=round(time.time() - lim['desde'], 1), **(det or {}))
+    return True
+
+
+def leer_contadores(flows):
+    usuarios, ofrecido, recursos, entrada = {}, {}, {}, {}
+    for f in flows:
+        t = f.get('lastSeen', 0) / 1000
+        crit = {c['type']: c for c in f['selector']['criteria']}
+        tb, pr = int(f['tableId']), f['priority']
+        mac = crit.get('ETH_SRC', {}).get('mac', '').lower()
+        if tb == 3 and pr == 35000 and mac:
+            usuarios[mac] = (f['bytes'], f['packets'], t)
+        elif tb == 2 and pr == 39000 and mac:
+            ofrecido[mac] = (f['bytes'], f['packets'], t)
+        elif tb == 5 and pr == 10100 and 'ETH_DST' in crit:     # entrega al usuario
+            m = crit['ETH_DST']['mac'].lower()
+            b, pk, tt = entrada.get(m, (0, 0, 0))
+            entrada[m] = (b + f['bytes'], pk + f['packets'], max(tt, t))
+        elif tb == 4 and pr == 25000 and 'IPV4_DST' in crit:
+            g = PREF2G.get(crit['IPV4_DST']['ip'])
+            if g:
+                b, pk, tt = recursos.get(g, (0, 0, 0))
+                recursos[g] = (b + f['bytes'], pk + f['packets'], max(tt, t))
+    return usuarios, ofrecido, recursos, entrada
+
+
+def watch_ddos():
+    """R4: consumo por usuario (T3) y por recurso (T4) desde los contadores de ONOS."""
+    while True:
+        time.sleep(DDOS_POLL)
+        try:
+            code, data = r2ctl.onos('GET', f'/flows/application/{r2ctl.APP}')
+            if code != 200:
+                continue
+            usuarios, ofrecido, recursos, entrada = leer_contadores(data.get('flows', []))
+            with lock:
+                lim = list(limits)
+                for m in lim:                      # la sesión terminó: fuera el límite
+                    if not session_of(mac=m):
+                        threading.Thread(target=lift_limit, args=(m, {'causa': 'sin sesión'}),
+                                         daemon=True).start()
+            for acc, mac, det in detector.actualizar(usuarios, recursos, ofrecido, lim, time.time(),
+                                                     entrada):
+                if acc == 'limitar':
+                    do_limit(mac, det)
+                else:
+                    lift_limit(mac, det)
+        except Exception as e:                           # noqa: BLE001
+            log('ERROR_DDOS', error=str(e)[:160])
+
+
 spoof_prev = {}              # flow id -> paquetes de la regla T1 de spoofing
 spoof_gracia = {}            # mac -> hasta cuándo no se evalúa (tras levantar un bloqueo)
 SPOOF_GRACIA = 8             # s: las estadísticas de ONOS llegan con hasta ~5 s de retraso
@@ -586,6 +701,17 @@ class H(BaseHTTPRequestHandler):
                     push()
                 log('BLOQUEO_LEVANTADO', mac=arg.lower())
                 return self.reply(200)
+        if res == 'trafico' and method == 'GET':
+            with lock:
+                return self.reply(200, {**detector.resumen(), 'limitados': dict(limits),
+                                        'umbrales': {k: v for k, v in vars(detector).items()
+                                                     if isinstance(v, (int, float))}})
+        if res == 'limit' and arg:
+            if method == 'POST':
+                return self.reply(200 if do_limit(arg, {'motivo': b.get('motivo', 'manual')},
+                                                  fuente='admin') else 404)
+            if method == 'DELETE':
+                return self.reply(200 if lift_limit(arg, {'causa': 'admin'}) else 404)
         if res == 'intentos' and method == 'GET':
             with lock:
                 return self.reply(200, [{'usuario': u, 'destino': d, **c}
@@ -628,7 +754,7 @@ def main():
     except (OSError, ValueError):
         pass
     log('ARRANQUE', sesiones=len(sessions))
-    for fn in (worker, expiry, watch_logoff, sync_with_aaa, watch_spoofing):
+    for fn in (worker, expiry, watch_logoff, sync_with_aaa, watch_spoofing, watch_ddos):
         threading.Thread(target=fn, daemon=True).start()
     push()
     ThreadingHTTPServer(('0.0.0.0', 5001), H).serve_forever()

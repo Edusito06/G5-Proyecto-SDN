@@ -11,10 +11,10 @@ cd "$(dirname "$0")"
 s() { local p=$1; shift; ssh -S ~/.ssh/ctl-$p x@$GW "$@"; }
 cp_() { scp -q -o ControlPath=~/.ssh/ctl-$1 "${@:2:$#-2}" x@$GW:"${@: -1}"; }
 
-cp_ 5806 identity.py r2ctl.py policy.yaml topology.yaml aaa-agent.py /tmp/
+cp_ 5806 identity.py r2ctl.py ddos.py policy.yaml topology.yaml aaa-agent.py /tmp/
 s 5806 'set -e
 sudo install -d -o ubuntu -g ubuntu /opt/g05/politica /var/lib/r2 /var/log/g05
-for f in identity.py r2ctl.py policy.yaml topology.yaml; do sudo install -m 644 -o ubuntu /tmp/$f /opt/g05/politica/$f; done
+for f in identity.py r2ctl.py ddos.py policy.yaml topology.yaml; do sudo install -m 644 -o ubuntu /tmp/$f /opt/g05/politica/$f; done
 sudo install -m 755 /tmp/aaa-agent.py /opt/g05/aaa-agent.py
 sudo tee /etc/systemd/system/g05-identity.service >/dev/null <<EOF
 [Unit]

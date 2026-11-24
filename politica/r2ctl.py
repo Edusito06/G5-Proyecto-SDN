@@ -353,6 +353,12 @@ def compile_all(pol, topo, meters_by_dev, sessions=None):
                 if u.get('bloqueado'):
                     R.append(rule(dev, 2, 40000, [c_in(p), c_mac('ETH_SRC', m)], [],
                                   f'T2 R3 bloqueo {h}: {u.get("motivo_bloqueo", "")}'[:120]))
+                # R4: fuente de DDoS limitada con su propio meter (no se bloquea). El
+                # contador de esta regla es la tasa ofrecida, antes del recorte del meter.
+                elif u.get('limite_meter'):
+                    R.append(rule(dev, 2, 39000, [c_in(p), c_mac('ETH_SRC', m)],
+                                  [i_meter(u['limite_meter']), i_tbl(3)],
+                                  f'T2 R4 límite DDoS {h} (meter {u["limite_meter"]})'))
                 R.append(rule(dev, 3, 35000, [c_in(p), c_mac('ETH_SRC', m)],
                               i_push(vid(u['rol'])) + [i_tbl(4)],
                               f'T3 identidad {h}: rol {u["rol"]} -> VLAN {vid(u["rol"])}'))

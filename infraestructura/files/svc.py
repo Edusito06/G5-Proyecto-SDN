@@ -30,9 +30,23 @@ def atender(c, banner):
                 if not more:
                     break
                 data += more
-            body = banner.encode()
-            c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n'
-                      b'Content-Length: ' + str(len(body)).encode() + b'\r\n\r\n' + body)
+            ruta = data.split(b' ', 2)[1] if data.count(b' ') >= 2 else b'/'
+            if ruta.startswith(b'/descarga'):
+                # R4: descarga de N MB (tráfico legítimo de prueba y medida de capacidad)
+                try:
+                    mb = min(200, max(1, int(ruta.split(b'mb=')[1].split(b'&')[0])))
+                except (IndexError, ValueError):
+                    mb = 10
+                c.settimeout(60)
+                c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n'
+                          b'Connection: close\r\nContent-Length: ' + str(mb << 20).encode() + b'\r\n\r\n')
+                bloque = bytes(1 << 16)
+                for _ in range(mb << 4):
+                    c.sendall(bloque)
+            else:
+                body = banner.encode()
+                c.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n'
+                          b'Content-Length: ' + str(len(body)).encode() + b'\r\n\r\n' + body)
         else:
             c.sendall(banner.encode())
         c.shutdown(socket.SHUT_WR)

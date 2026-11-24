@@ -4,7 +4,7 @@ Proyecto del curso **TEL354 – Redes Definidas por Software** (PUCP, 2026-2), g
 
 Solución SDN para una red de campus académico desplegada sobre el *private cloud* **VNRT**: un clúster de control **ONOS** de dos nodos, respaldado por **Atomix** (Raft, 3 nodos), gobierna seis switches **Open vSwitch** mediante **OpenFlow 1.3**. El canal de control viaja **in-band** por la propia red de datos, con caminos de respaldo que se activan en menos de un segundo ante la caída de enlaces o de un switch de núcleo.
 
-Requerimientos del grupo: **R1** (control de acceso por rol), **R2** (protección de recursos privilegiados) y **R3** (detección y mitigación de ataques encubiertos en la intranet). Como grupo de 4 se suma **R4** (mitigación de DDoS).
+Requerimientos del grupo: **R1** (control de acceso por rol), **R2** (protección de recursos privilegiados) y **R3** (detección y mitigación de ataques encubiertos en la intranet). Como grupo de 4 se suma **R4** (detección de DDoS por consumo de ancho de banda y mitigación por fuente).
 
 ---
 
@@ -219,6 +219,31 @@ sequenceDiagram
 
 **Limitaciones del VNRT:** el enlace directo R-SW1/ens6 → IDS solo entrega tramas dirigidas a la MAC del IDS (y broadcast): el espejo unicast se perdía. Por eso el espejo viaja en GRE por la red de gestión, como un ERSPAN.
 
+### R4: mitigación de DDoS por consumo de ancho de banda
+
+R3 detecta ataques con firma (escaneos, SYN flood, ráfagas HTTP). R4 detecta **volumen**: una inundación sin firma (por ejemplo, ACK o UDP con carga útil) que satura un servidor o el enlace compartido.
+
+| Pieza | Qué hace |
+|---|---|
+| Monitor (`watch_ddos` en `identity`) | Cada 2,5 s lee los contadores de ONOS: lo que envía cada usuario (regla T3), lo que recibe (reglas T5 de entrega) y lo que llega a cada recurso (reglas T4 que lo permiten) |
+| Detector (`politica/ddos.py`) | Sin E/S, probado en unitarias |
+| Mitigación | Un **meter propio por fuente** (2 Mbit/s, `DROP`) en una regla T2 (prioridad 39000) delante de su identidad. No se bloquea, se limita: la política de su rol sigue igual y el resto de usuarios no se toca. Un bloqueo de R3 tiene prioridad sobre el límite |
+| Registro | `DDOS_DETECTADO` (usuario, rol, IP, MAC, motivo, tasas, meter), `MITIGACION_APLICADA` (ms hasta la regla) y `LIMITE_LEVANTADO`, en el registro de seguridad |
+| API | `GET /identity/trafico` (tasas en vivo, límites y umbrales) y `POST`/`DELETE /identity/limit/<mac>` (límite manual) |
+
+**Cuándo una fuente es atacante.** Primero, siempre debe **enviar más de lo que recibe**: quien descarga a 1 Gbit/s manda decenas de miles de ACK/s, pero recibe 40 veces más. Además debe cumplir uno de dos casos:
+- **Volumétrico:** un usuario supera 50 Mbit/s o 15 000 paquetes/s durante 2 lecturas seguidas de ONOS.
+- **Distribuido:** un recurso recibe más de 80 Mbit/s o 20 000 paquetes/s. Son fuentes los usuarios que aportan más de 10 Mbit/s o 2 000 paquetes/s, aunque ninguno supere el umbral individual.
+
+**Levantamiento:** el límite se quita cuando lo que la fuente sigue ofreciendo (contador de la regla T2, antes del meter) baja de la mitad del umbral de aporte durante 30 s.
+
+**Configuración:** los umbrales se ajustan por variables de entorno (`DDOS_*`).
+
+**Límites del diseño:**
+- **Tiempo de detección:** la resolución la fija el sondeo de estadísticas de ONOS (`flowPollFrequency` = 5 s). Bajarlo a 2 s acortaría la detección a la mitad, a cambio de más carga en el controlador.
+- **Subidas legítimas:** una subida legítima muy grande y sostenida (enviar más de lo que se recibe, por encima del umbral) se trata como fuente y se limita.
+- **Red de gestión:** el espejo de R3 copia el tráfico de usuarios por la red de gestión. Durante un DDoS real esa copia compite con la sincronización del clúster, así que en producción el espejo iría por una red propia.
+
 ### Servicios: DHCP de alumnos
 
 Cada segmento de servicio es un circuito L2 transportado con una VLAN entre switches y entregado sin etiqueta en sus extremos (`g05-servicios`, prioridad 50000):
@@ -257,6 +282,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 | DHCP de alumnos (VLAN 200, relay en Core-1, Kea) | ✅ Concesión completa al Alumno (`10.20.0.100/24`) |
 | **R2** política por rol en R-SW1 | ✅ 216 pruebas, 0 discrepancias; 142/142 bloqueados; trazabilidad 53/53 con usuario; 200 sesiones con 1 503 reglas y 30 sesiones/s en ráfaga |
 | **R1** 802.1X (EAP-TLS) dinámico con roles por LDAP | ✅ Los 6 roles por autenticación real (216 pruebas, 0 discrepancias); 21/21 accesos inválidos bloqueados; EAP-TLS en 82 ms; ~33 auth/s |
+| **R4** DDoS por ancho de banda + meter por fuente | ✅ Una fuente y ataque distribuido: fuentes identificadas en ~14 s, la víctima pasa de 75–125 a 2–6 Mbit/s, el testigo nunca se limita, 0 falsos positivos |
 | **R3** IDS Suricata + mitigación por ONOS | ✅ 8/8 ataques detectados y mitigados en 0,3–4,7 s, 0 falsos positivos, el testigo nunca se afecta |
 
 ---
@@ -298,13 +324,14 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── templates/                Plantilla del perfil estático anterior
 │   └── evidencia/                Evidencia JSON generada en el slice
 ├── pruebas/
-│   ├── unitarias/                pytest sin red: r2ctl, identity y g05-redundancia (69 pruebas)
+│   ├── unitarias/                pytest sin red: r2ctl, identity, R4 y g05-redundancia (81 pruebas)
 │   ├── prueba-fallas.sh          Pruebas de caída de enlaces y de Core-1
 │   ├── prueba-caida-df1.sh       Caída de ONOS-1 + Atomix-1 y toma de control de ONOS-2
 │   ├── prueba-r1.sh              R1: accesos inválidos, latencia de autenticación y auth/s
 │   ├── prueba-r2-trazabilidad.sh R2: matriz completa cruzada con el registro de intentos
 │   ├── prueba-r2-escala.sh       R2: reglas y tiempos con 0–200 sesiones, altas y ráfagas
 │   ├── prueba-r3.sh              R3: falsos positivos y 8 ataques con tiempo de mitigación
+│   ├── prueba-r4.sh              R4: DDoS de una fuente y distribuido, víctima y testigo
 │   ├── carga-ids.sh              R3: sesiones maliciosas/s que el IDS soporta sin pérdidas
 │   └── incidentes.sh             R3: registro consolidado de incidentes (tabla y CSV)
 ├── politica/                     R2 sobre el slice final
@@ -316,6 +343,7 @@ Core-1 no reenvía IPv4 entre segmentos. En esta fase, R-SW1 solo deja pasar del
 │   ├── aaa-agent.py              Eventos AAA del log de cada nodo ONOS -> identity
 │   ├── instalar-identity.sh      Instala identity (ONOS-1) y aaa-agent (ONOS-1 y ONOS-2)
 │   ├── escala.py                 Sesiones sintéticas para la prueba de escalabilidad (en ONOS-1)
+│   ├── ddos.py                   R4: detector de DDoS por consumo (sin E/S, lo usa identity)
 │   └── g05-r1.sh                 Cliente 802.1X/DHCP por namespace (login | logout | status | dhcp)
 └── r2-demo/                      Demo R2/R1 del parcial (slice anterior de 4 switches)
     ├── ansible/                  Controller, switches, endpoints, LDAP/RADIUS, 802.1X
@@ -451,13 +479,14 @@ Corren en segundos, sin el slice ni la red: importan el código y lo ejercitan c
 
 ```bash
 python3 -m pip install pytest pyyaml
-python3 -m pytest pruebas/unitarias -q        # 69 passed
+python3 -m pytest pruebas/unitarias -q        # 81 passed
 ```
 
 | Suite | Pruebas | Qué comprueba |
 |---|---|---|
 | `test_r2ctl.py` | 17 | Un **simulador del pipeline OpenFlow** recorre las reglas compiladas para R-SW1 tabla por tabla, como OVS. Su veredicto se compara con el oráculo de `policy.yaml` en las **216 combinaciones** de la matriz. También cubre: bloque crítico, IP falsa (descartada y contada por el sensor de R3), MAC desconocida, bloqueo de R3 sobre tráfico permitido, cuarentena, ventana DHCP con la VLAN del rol, retorno sin etiqueta, EAPOL al controlador, 7 reglas por sesión y las firmas del IDS de cada rol |
 | `test_identity.py` | 27 | R1: unión RADIUS + AAA y rechazo si falta RADIUS, es de otro usuario, venció o trae una VLAN inexistente. DHCP solo dentro de la subred del rol, reautenticación, cambio de rol y de puerto, persistencia. R3: bloqueo por alerta, cuarentena a la tercera, alerta sin origen. R2: intento denegado registrado sin bloquear. API: qué origen puede llamar a qué (11 casos) |
+| `test_ddos.py` | 12 | R4: tráfico normal y picos aislados no disparan; una descarga a 1,3 Gbit/s (55 000 ACK/s) no es fuente; flood volumétrico por bit/s y por paquetes/s; ataque distribuido bajo el umbral individual; levantamiento solo tras enfriar; lecturas repetidas de ONOS y contadores reiniciados; regla T2 con meter que conserva la política; R3 gana a R4; lectura de contadores de ONOS |
 | `test_redundancia.py` | 25 | Un simulador del control in-band sigue el TCP/6653 de los 6 switches hacia **ONOS-1 y ONOS-2, ida y vuelta**, con los grupos Fast Failover. Se prueba sin fallas, con **cada uno de los 9 enlaces caído** y con **Core-1 caído** |
 
 Las pruebas detectan errores reales:
@@ -490,6 +519,28 @@ Al restaurar Core-1, su sesión se restablece sola en ~10 s. La detección con B
 | 11 s | 6/6 |
 
 Atomix siguió con 2 de 3 votos sin elecciones nuevas, porque los líderes de las particiones estaban en Atomix-2 y Atomix-3. Al restaurar, ONOS-1 vuelve al clúster con la configuración intacta, que está guardada en Atomix. La medición tiene una resolución de ~3 s, porque cada vuelta consulta los 6 switches por SSH.
+
+**R4: DDoS** (`pruebas/prueba-r4.sh`).
+- **Víctima:** Mesa de ayuda (VM Recursos).
+- **Testigo:** un invitado que descarga de la víctima durante todo el ataque.
+- **Ataque:** inundación ACK con 1 200 B de carga hacia :80 (`hping3`), sin firma en R3.
+- **Medición:** lo que llega a la víctima se mide en su interfaz (`ens4`).
+
+| | Una fuente (alu01) | Distribuido (alu01 + 2 invitados) |
+|---|---|---|
+| Ofrecido por fuente | ~78 Mbit/s | ~43 Mbit/s (bajo el umbral individual de 50) |
+| Recibe la víctima durante el ataque | 74,8 Mbit/s, 7 456 pps | 124,7 Mbit/s, 12 434 pps |
+| Fuentes identificadas | 1/1 (volumétrico) | 3/3 (`distribuido contra G12`), con usuario, rol, IP y MAC |
+| Tiempo hasta limitar (desde el inicio) | 13,6 s (11,3 s en otra corrida) | 13,8 s |
+| Regla aplicada por ONOS | 148 ms | 137–203 ms |
+| Recibe la víctima con el límite | **2,0 Mbit/s**, 200 pps | **6,0 Mbit/s** (3 × 2 Mbit/s), 599 pps |
+| Testigo antes → durante | 1 451 → 921 Mbit/s, conexión 2,0 → 1,5 ms | 762 → 1 133 Mbit/s, conexión 2,0 → 1,7 ms |
+| Testigo limitado | No | No |
+| Límite levantado tras el fin del ataque | 40,8 s | 41,5 s |
+
+- **Falsos positivos:** 0 durante 60 s de descargas de 200 MB a toda velocidad del testigo y de alu01.
+- **El testigo nunca bajó de 900 Mbit/s:** la variación entre corridas viene del VNRT, no del ataque.
+- **Dónde se mide el meter:** OVS atribuye los contadores de flujo a todas las reglas que recorre un paquete antes de que el meter lo descarte en el datapath. Por eso el efecto del meter se mide en la víctima y no en el contador de T3.
 
 **R2: trazabilidad** (`pruebas/prueba-r2-trazabilidad.sh`). Corre la matriz completa (`verify --roles all`, 802.1X real) y la cruza con el registro.
 
@@ -662,7 +713,7 @@ python3 r2/r2ctl.py validate   # también: plan, apply, verify, stats, rol, clea
 ## Hoja de ruta
 
 1. **Puertos de acceso adicionales** para probar varios supplicants simultáneos (hoy solo hay un puerto de usuarios).
-2. **R4:** detección de DDoS por consumo de ancho de banda y mitigación con meters de OpenFlow.
+2. **R4:** bajar `flowPollFrequency` de ONOS a 2 s para detectar en ~5 s, y llevar el espejo del IDS a una red propia.
 3. **Prueba física de DF1:** apagar DC-DIST y comprobar que el control sigue por ONOS-2.
 
 ---
