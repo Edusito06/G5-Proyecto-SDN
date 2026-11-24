@@ -14,3 +14,6 @@ __pycache__/
 # Compilación de la app ONOS (se conserva solo el OAR publicado)
 infraestructura/paper-app/target/*
 !infraestructura/paper-app/target/g05-inband-1.0.0.oar
+
+# Medición de cobertura (pytest-cov)
+.coverage
